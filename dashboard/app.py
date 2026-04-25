@@ -38,9 +38,15 @@ _analysis_state = {
 
 
 def _analysis_worker():
-    """Single background thread — drains the queue one ticker at a time."""
+    """Single background thread — drains the queue one ticker at a time.
+    Catches all exceptions so the thread never dies silently; the watchdog
+    below will restart it if something truly unrecoverable happens.
+    """
     while True:
-        ticker = _analysis_queue.get()
+        try:
+            ticker = _analysis_queue.get(timeout=5)
+        except queue.Empty:
+            continue
         with _analysis_lock:
             _analysis_state['active'] = ticker
             if ticker in _analysis_state['queue']:
@@ -52,11 +58,32 @@ def _analysis_worker():
         finally:
             with _analysis_lock:
                 _analysis_state['active'] = None
-            _analysis_queue.task_done()
+            try:
+                _analysis_queue.task_done()
+            except ValueError:
+                pass  # task_done() called more times than get() — harmless
 
 
-_analysis_worker_thread = threading.Thread(target=_analysis_worker, daemon=True)
-_analysis_worker_thread.start()
+def _start_worker():
+    t = threading.Thread(target=_analysis_worker, daemon=True, name='analysis-worker')
+    t.start()
+    return t
+
+
+_analysis_worker_thread = _start_worker()
+
+
+def _worker_watchdog():
+    """Restart the analysis worker if it ever dies unexpectedly."""
+    global _analysis_worker_thread
+    while True:
+        threading.Event().wait(timeout=15)
+        if not _analysis_worker_thread.is_alive():
+            log('WARNING', 'dashboard', 'Analysis worker thread died — restarting')
+            _analysis_worker_thread = _start_worker()
+
+
+threading.Thread(target=_worker_watchdog, daemon=True, name='worker-watchdog').start()
 
 _FX_CACHE = {}
 _FX_LOADED_AT = None
@@ -3070,6 +3097,36 @@ def api_brief():
     return jsonify(brief)
 
 
+@app.route('/health')
+def health():
+    """Lightweight liveness probe — used by systemd and external monitors."""
+    try:
+        query("SELECT 1")
+        db_ok = True
+    except Exception:
+        db_ok = False
+    worker_ok = _analysis_worker_thread.is_alive()
+    status = 200 if (db_ok and worker_ok) else 503
+    return jsonify({
+        'ok':        db_ok and worker_ok,
+        'db':        db_ok,
+        'worker':    worker_ok,
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+    }), status
+
+
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    """Catch-all: log and return 500 without crashing the process."""
+    log('ERROR', 'dashboard', f'Unhandled exception in route: {type(e).__name__}: {e}')
+    return jsonify({'error': 'Internal server error', 'detail': str(e)}), 500
+
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({'error': 'Not found'}), 404
+
+
 # ── Ticker detail page ────────────────────────────────────────────────────────
 
 _TICKER_DETAIL = """
@@ -5037,5 +5094,16 @@ def portfolio():
 
 
 if __name__ == '__main__':
-    log('INFO', 'dashboard', 'Starting web dashboard on 0.0.0.0:5000')
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    import time as _time
+    port = int(os.environ.get('DASHBOARD_PORT', 5000))
+    for attempt in range(1, 6):
+        try:
+            log('INFO', 'dashboard', f'Starting web dashboard on 0.0.0.0:{port} (attempt {attempt})')
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+            break
+        except OSError as e:
+            if 'Address already in use' in str(e):
+                log('WARNING', 'dashboard', f'Port {port} in use — waiting 10s before retry')
+                _time.sleep(10)
+            else:
+                raise
