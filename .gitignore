@@ -1,0 +1,53 @@
+# ── Secrets & credentials ────────────────────────────────────────────────────
+.env
+*.env
+.env.local
+
+# ── Runtime data (caches, state, logs) ───────────────────────────────────────
+data/
+logs/
+*.log
+nohup.out
+/tmp/
+
+# ── Downloaded ML models (large binary files — download via HuggingFace) ─────
+models/
+
+# ── Third-party cloned libraries ─────────────────────────────────────────────
+TradingAgents/
+
+# ── Python bytecode ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Claude Code session files ─────────────────────────────────────────────────
+.claude/
+
+# ── IDE & OS files ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── pytest & coverage ─────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
