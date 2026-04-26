@@ -21,34 +21,59 @@ from db.database import execute, query, log, get_setting
 CACHE_DIR = Path('/home/ubuntu/advisor/data/universe_cache')
 DB_URL = 'https://raw.githubusercontent.com/adanos-software/free-ticker-database/main/data/tickers.csv'
 
-# Full exchange catalogue: exchange_code -> (yf_suffix, country_code)
-# Friendly alias used in UNIVERSE_MARKETS env var -> canonical code(s) it covers
+# Nordnet-eligible exchange catalogue: adanos_exchange_code -> (yf_suffix, country_code)
+# Keys must match the uppercased exchange values in the adanos ticker database.
+# US ETFs in this list are blocked by tax_filter.py (MiFID II); stocks pass through.
 _ALL_EXCHANGES = {
-    'NASDAQ':    ('', 'US'),
-    'NYSE':      ('', 'US'),
-    'AMEX':      ('', 'US'),
-    'NYSE MKT':  ('', 'US'),   # alias for AMEX
-    'NYSE ARCA': ('', 'US'),
+    # United States
+    'NASDAQ':    ('',    'US'),
+    'NYSE':      ('',    'US'),
+    'NYSE ARCA': ('',    'US'),   # ETF-heavy; US ETFs blocked by MiFID II
+    'NYSE MKT':  ('',    'US'),   # NYSE American (formerly AMEX)
+    # Europe
     'XETRA':     ('.DE', 'DE'),
-    'FSX':       ('.F', 'DE'),
-    'LSE':       ('.L', 'GB'),
-    'LON':       ('.L', 'GB'),
+    'LSE':       ('.L',  'GB'),
     'SIX':       ('.SW', 'CH'),
+    'EURONEXT':  ('.PA', 'FR'),   # Paris primary listings
+    'AMS':       ('.AS', 'NL'),   # Euronext Amsterdam
+    'BME':       ('.MC', 'ES'),   # Madrid
+    # Nordic
     'HEL':       ('.HE', 'FI'),
-    'XHEL':      ('.HE', 'FI'),
     'STO':       ('.ST', 'SE'),
-    'XSTO':      ('.ST', 'SE'),
     'CPH':       ('.CO', 'DK'),
-    'XCPH':      ('.CO', 'DK'),
-    'FNSE':      ('.ST', 'SE'),
-    'FNFI':      ('.HE', 'FI'),
-    'FNDK':      ('.CO', 'DK'),
+    'OSL':       ('.OL', 'NO'),
+    # Asia-Pacific
+    'TSE':       ('.T',  'JP'),
+    'HKEX':      ('.HK', 'HK'),
+    'ASX':       ('.AX', 'AU'),
+}
+
+# ETF category (from adanos etf_category column) -> sector stored in universe table
+ETF_CATEGORY_TO_SECTOR = {
+    'Equity':            'ETF-Equity',
+    'Fixed Income':      'ETF-Bond',
+    'Commodity':         'ETF-Commodity',
+    'Real Estate':       'ETF-RealEstate',
+    'Money Market':      'ETF-Bond',
+    'Alternative':       'ETF-Alternative',
+    'Leveraged/Inverse': 'ETF-Leveraged',
+    'Currency':          'ETF-Currency',
+    'Multi-Asset':       'ETF-MultiAsset',
+    'Other':             'ETF-Other',
 }
 
 # Aliases: short names users write in UNIVERSE_MARKETS -> codes in _ALL_EXCHANGES
 _ALIASES = {
-    'NYSE_MKT':  'NYSE MKT',
-    'NYSE_ARCA': 'NYSE ARCA',
+    'NYSE_MKT':   'NYSE MKT',
+    'NYSE_ARCA':  'NYSE ARCA',
+    'AMEX':       'NYSE MKT',   # legacy alias
+    'PARIS':      'EURONEXT',
+    'AMSTERDAM':  'AMS',
+    'MADRID':     'BME',
+    'OSLO':       'OSL',
+    'TOKYO':      'TSE',
+    'HONGKONG':   'HKEX',
+    'AUSTRALIA':  'ASX',
 }
 
 
@@ -128,11 +153,13 @@ def _find_col(df: pd.DataFrame, candidates: list):
 
 
 def _filter_target_exchanges(df: pd.DataFrame) -> pd.DataFrame:
-    exc_col = _find_col(df, ['exchange', 'Exchange', 'EXCHANGE', 'mic', 'MIC'])
-    ticker_col = _find_col(df, ['ticker', 'Ticker', 'symbol', 'Symbol'])
-    name_col = _find_col(df, ['name', 'Name', 'company', 'Company', 'company_name'])
-    sector_col = _find_col(df, ['sector', 'Sector', 'industry', 'Industry'])
-    country_col = _find_col(df, ['country', 'Country', 'country_code'])
+    exc_col        = _find_col(df, ['exchange', 'Exchange', 'EXCHANGE', 'mic', 'MIC'])
+    ticker_col     = _find_col(df, ['ticker', 'Ticker', 'symbol', 'Symbol'])
+    name_col       = _find_col(df, ['name', 'Name', 'company', 'Company', 'company_name'])
+    sector_col     = _find_col(df, ['stock_sector', 'sector', 'Sector', 'industry', 'Industry'])
+    country_col    = _find_col(df, ['country', 'Country', 'country_code'])
+    asset_type_col = _find_col(df, ['asset_type'])
+    etf_cat_col    = _find_col(df, ['etf_category'])
 
     if not exc_col or not ticker_col:
         log('ERROR', 'universe', f'Missing required columns. Found: {list(df.columns)}')
@@ -151,14 +178,33 @@ def _filter_target_exchanges(df: pd.DataFrame) -> pd.DataFrame:
         if not raw_ticker or raw_ticker.lower() in ('nan', ''):
             continue
         yf_ticker = raw_ticker + suffix if suffix and not raw_ticker.endswith(suffix) else raw_ticker
+
+        # Asset type: 'etf' or 'stock'
+        raw_type = str(row[asset_type_col]).strip().lower() if asset_type_col else ''
+        is_etf = (raw_type == 'etf')
+        asset_type = 'etf' if is_etf else 'stock'
+
+        # Sector: ETF category for ETFs, stock sector for equities
+        if is_etf and etf_cat_col:
+            cat = str(row[etf_cat_col]).strip()
+            sector = ETF_CATEGORY_TO_SECTOR.get(cat, 'ETF-Other')
+        elif sector_col:
+            sector = str(row[sector_col]).strip()
+        else:
+            sector = ''
+
         rows.append({
-            'ticker': yf_ticker,
+            'ticker':       yf_ticker,
             'company_name': str(row[name_col]).strip() if name_col else '',
-            'exchange': exc,
-            'sector': str(row[sector_col]).strip() if sector_col else '',
-            'country': country,
+            'exchange':     exc,
+            'sector':       sector,
+            'country':      country,
+            'asset_type':   asset_type,
         })
 
+    etf_count   = sum(1 for r in rows if r['asset_type'] == 'etf')
+    stock_count = sum(1 for r in rows if r['asset_type'] == 'stock')
+    log('INFO', 'universe', f'  {stock_count:,} stocks, {etf_count:,} ETFs after exchange filter')
     return pd.DataFrame(rows)
 
 
@@ -235,22 +281,24 @@ def load_universe(validate: bool = True, max_validate: int = 3000) -> int:
     for _, row in valid_df.iterrows():
         try:
             execute("""
-                INSERT INTO universe (ticker, company_name, exchange, sector, country, active, validated, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, true, true, NOW(), NOW())
+                INSERT INTO universe (ticker, company_name, exchange, sector, country, asset_type, active, validated, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, true, true, NOW(), NOW())
                 ON CONFLICT (ticker) DO UPDATE SET
                     company_name = EXCLUDED.company_name,
-                    exchange = EXCLUDED.exchange,
-                    sector = EXCLUDED.sector,
-                    country = EXCLUDED.country,
-                    active = true,
-                    validated = true,
-                    updated_at = NOW()
+                    exchange     = EXCLUDED.exchange,
+                    sector       = EXCLUDED.sector,
+                    country      = EXCLUDED.country,
+                    asset_type   = EXCLUDED.asset_type,
+                    active       = true,
+                    validated    = true,
+                    updated_at   = NOW()
             """, (
                 row['ticker'],
                 row['company_name'][:200],
                 row['exchange'],
                 row['sector'][:100],
                 row['country'],
+                row['asset_type'],
             ))
             stored += 1
         except Exception as e:
@@ -258,9 +306,14 @@ def load_universe(validate: bool = True, max_validate: int = 3000) -> int:
 
     log('INFO', 'universe', f'Universe updated: {stored:,} tickers stored')
 
-    summary = query("SELECT country, COUNT(*) as n FROM universe WHERE active = true GROUP BY country ORDER BY n DESC LIMIT 15")
+    summary = query("""
+        SELECT exchange, asset_type, COUNT(*) AS n
+        FROM universe WHERE active = true
+        GROUP BY exchange, asset_type ORDER BY n DESC LIMIT 30
+    """)
+    print('\nUniverse by exchange + asset type:')
     for r in summary:
-        print(f'  {r["country"]}: {r["n"]} tickers')
+        print(f'  {r["exchange"]:12s} {str(r["asset_type"] or "stock"):6s}  {r["n"]}')
 
     return stored
 
