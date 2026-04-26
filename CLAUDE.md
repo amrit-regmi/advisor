@@ -103,7 +103,7 @@ from db.database import execute, query, log, can_use_alpha_vantage
 - pipeline/tax_filter.py — Finnish MiFID II filter
 
 ### Phase 8 — Daily-16 Selection
-- pipeline/daily_sixteen.py
+- pipeline/daily_selection.py
 - Priority: holdings → watchlist top-3 → strong overrides (conviction≥0.70) → discovery 2 → rotation fill
 - Portfolio full (10 holdings) → no discovery
 
@@ -152,8 +152,8 @@ from db.database import execute, query, log, can_use_alpha_vantage
 4. event_mapper.py
 5. scorer.py
 6. tax_filter.py
-7. daily_sixteen.py
-8. trading_agents_wrapper.py (analyze_daily_sixteen)
+7. daily_selection.py
+8. trading_agents_wrapper.py (analyze_daily_selection)
 9. reconciliation.py
 10. optimizer.py
 11. holdings_monitor.py

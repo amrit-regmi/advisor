@@ -1888,6 +1888,69 @@ _SETTINGS = """
     </div>
   </div>
 
+  {# ── Danger Zone ── #}
+  <div class="col-12">
+    <div class="card" style="border-color:var(--red)">
+      <div class="card-header" style="background:var(--red-dim,rgba(220,53,69,.12));color:var(--red);font-weight:600">
+        &#9888; Danger Zone
+      </div>
+      <div class="card-body">
+        <div class="d-flex align-items-start gap-3 flex-wrap">
+          <div style="flex:1;min-width:220px">
+            <strong>Reset &amp; Start Fresh</strong>
+            <p class="text-muted mb-0" style="font-size:.82rem;margin-top:.3rem">
+              Wipes all holdings, trades, recommendations, watchlist, discovery candidates
+              and penalties. Resets cash to the simulation initial cash setting.
+              <strong>This cannot be undone.</strong>
+            </p>
+          </div>
+          <button class="btn btn-outline-danger btn-sm align-self-center"
+                  onclick="document.getElementById('resetModal').style.display='flex'">
+            Reset Everything
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── Reset confirmation modal ── #}
+  <div id="resetModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
+       z-index:9999;align-items:center;justify-content:center">
+    <div class="card" style="max-width:420px;width:90%;border-color:var(--red)">
+      <div class="card-header" style="background:var(--red);color:#fff;font-weight:600">
+        &#9888;&nbsp; Confirm Full Reset
+      </div>
+      <div class="card-body">
+        <p style="font-size:.9rem">This will permanently delete:</p>
+        <ul style="font-size:.85rem;color:var(--muted)">
+          <li>All holdings &amp; trade history</li>
+          <li>All recommendations</li>
+          <li>All watchlist entries</li>
+          <li>All discovery candidates &amp; penalties</li>
+          <li>Performance history &amp; strategy metrics</li>
+        </ul>
+        <p style="font-size:.82rem;color:var(--green)">
+          &#10003; Universe, prices, sentiment &amp; macro data are <strong>kept</strong>.
+        </p>
+        <p style="font-size:.85rem">Cash will be reset to
+          <strong>€{{ smap.get('simulation_initial_cash') or '2000' }}</strong>
+          (your simulation initial cash setting).</p>
+        <p style="font-size:.85rem;color:var(--red)"><strong>This cannot be undone.</strong></p>
+        <div class="d-flex gap-2 justify-content-end mt-3">
+          <button class="btn btn-sm btn-secondary"
+                  onclick="document.getElementById('resetModal').style.display='none'">
+            Cancel
+          </button>
+          <form method="POST" action="/settings/reset" style="margin:0">
+            <button type="submit" class="btn btn-sm btn-danger">
+              Yes, reset everything
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
   {# ── LLM Budget ── #}
   <div class="col-12">
     <div class="card">
@@ -2416,6 +2479,31 @@ def settings_simulation():
     else:
         flash('Simulation disabled.')
     log('INFO', 'dashboard', f'Simulation settings updated: simulate={simulate}')
+    return redirect(url_for('settings'))
+
+
+@app.route('/settings/reset', methods=['POST'])
+def settings_reset():
+    try:
+        rows = query("SELECT value FROM user_settings WHERE key='simulation_initial_cash'")
+        initial_cash = float(rows[0]['value']) if rows and rows[0]['value'] else 2000.0
+
+        # Simulation state only — universe, prices, sentiment, macro data are preserved
+        execute("DELETE FROM holdings")
+        execute("DELETE FROM trades")
+        execute("DELETE FROM recommendations")
+        execute("DELETE FROM watchlist")
+        execute("DELETE FROM discovery_candidates")
+        execute("DELETE FROM performance_history")
+        execute("DELETE FROM strategy_metrics")
+
+        _upsert_setting('nordnet_cash_eur', str(initial_cash))
+        _upsert_setting('monthly_invested_this_month', '0')
+
+        log('INFO', 'dashboard', f'Full reset performed — cash reset to €{initial_cash:.0f}')
+        flash(f'Reset complete. All data cleared. Cash set to €{initial_cash:,.0f}.')
+    except Exception as e:
+        flash(f'Reset failed: {e}')
     return redirect(url_for('settings'))
 
 

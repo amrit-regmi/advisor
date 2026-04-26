@@ -131,11 +131,11 @@ def build_context(ticker: str, ticker_state: str) -> dict:
     }
 
 
-def build_all_contexts(daily_sixteen: list) -> dict:
-    """Build context for all tickers in daily-16. Returns {ticker: context}."""
+def build_all_contexts(daily_selection: list) -> dict:
+    """Build context for all tickers in the daily selection. Returns {ticker: context}."""
     portfolio = _get_portfolio_snapshot()  # compute once
     contexts = {}
-    for item in daily_sixteen:
+    for item in daily_selection:
         ticker = item['ticker']
         state = item.get('state', 'discovery')
         log('context_builder', 'info', f'Building context for {ticker}')

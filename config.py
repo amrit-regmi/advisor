@@ -17,6 +17,21 @@ MIN_GDELT_ARTICLES = 5
 MIN_MOMENTUM_SIGNAL = 5.0
 POLYMARKET_MIN_PROBABILITY = 0.60
 
+# Pipeline limits
+MIN_TRADE_VALUE_EUR = float(os.getenv('MIN_TRADE_VALUE_EUR', 50))
+DAILY_ANALYSIS_COUNT = int(os.getenv('DAILY_ANALYSIS_COUNT', 20))
+MAX_HOLDINGS = int(os.getenv('MAX_HOLDINGS', 10))
+
+# Schedule (read by setup.sh to install cron)
+SCHEDULE_DAYS = os.getenv('SCHEDULE_DAYS', '1-5')
+SCHEDULE_DAILY_TIME = os.getenv('SCHEDULE_DAILY_TIME', '04:00')
+SCHEDULE_BRIEF_TIME = os.getenv('SCHEDULE_BRIEF_TIME', '07:00')
+SCHEDULE_MIDDAY_TIME = os.getenv('SCHEDULE_MIDDAY_TIME', '12:00')
+
+# Market selection
+UNIVERSE_MARKETS = os.getenv('UNIVERSE_MARKETS', '')   # empty = all supported exchanges
+ANALYSIS_MARKETS = os.getenv('ANALYSIS_MARKETS', '')   # empty = same as UNIVERSE_MARKETS
+
 # Default watchlist (used if DB watchlist is empty)
 WATCHLIST = {
     'AAPL': 'Apple',

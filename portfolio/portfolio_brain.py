@@ -11,14 +11,20 @@ Logic flow per run:
   7. Size positions with regime-adjusted multiplier
   8. Save recommendations, return brief
 """
+import os
 import sys
+import math
 import json
 from datetime import date, timedelta
 
 sys.path.insert(0, '/home/ubuntu/advisor')
+from dotenv import load_dotenv
+load_dotenv('/home/ubuntu/advisor/.env')
 from db.database import query, execute, log
 from portfolio.optimizer import optimize_candidates, get_weight_hint
 from portfolio.sector_utils import normalize as normalize_sector, country_to_region, DEFAULT_REGION_TARGETS
+
+MIN_TRADE_VALUE_EUR = float(os.getenv('MIN_TRADE_VALUE_EUR', 50))
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
@@ -910,7 +916,7 @@ def build_brief():
     spent_eur = 0.0
     for score, ticker, cand, reason, conf in final_buys:
         remaining_budget = (budget - spent_eur) * size_mult
-        if remaining_budget < 50:   # below €50 you can't buy 1 share of most things
+        if remaining_budget < MIN_TRADE_VALUE_EUR:
             break
 
         # Conviction gate: TradingAgents BUY is sufficient on its own.
@@ -977,6 +983,30 @@ def build_brief():
             continue
 
         shares, price_eur, cost = sizing
+
+        # Enforce minimum trade value — broker min fees make tiny trades uneconomical
+        if cost < MIN_TRADE_VALUE_EUR:
+            min_shares = math.ceil(MIN_TRADE_VALUE_EUR / price_eur)
+            min_cost = round(min_shares * price_eur, 2)
+            if min_cost <= remaining_budget:
+                shares, cost = min_shares, min_cost
+                log('INFO', 'portfolio_brain',
+                    f'{ticker}: bumped to {shares} shares (€{cost:.0f}) to meet MIN_TRADE_VALUE_EUR={MIN_TRADE_VALUE_EUR:.0f}')
+            else:
+                log('INFO', 'portfolio_brain',
+                    f'{ticker}: €{cost:.0f} below min €{MIN_TRADE_VALUE_EUR:.0f} and cannot round up within budget — WATCH')
+                watches.append({
+                    'ticker':       ticker,
+                    'company_name': cand.get('company_name', ticker),
+                    'sector':       cand.get('sector', ''),
+                    'action':       'WATCH',
+                    'confidence':   conf,
+                    'reasoning':    reason,
+                    'trigger':      f'Below min trade value €{MIN_TRADE_VALUE_EUR:.0f} — add more capital',
+                })
+                _save_rec(ticker, 'WATCH', conf, reason, 'portfolio_brain,below_min_trade')
+                continue
+
         if freed_eur >= cost:
             funding = f'proceeds from sells (€{freed_eur:.0f} freed)'
             freed_eur -= cost

@@ -3,15 +3,18 @@ Global Reconciliation Layer — converts per-ticker TradingAgents decisions
 into a portfolio-level trade plan. Applies holdings constraints, sector/country
 limits, turnover rules, rotation logic, and watchlist actions.
 """
+import os
 import sys
 import json
 from datetime import date, timedelta
 
 sys.path.insert(0, '/home/ubuntu/advisor')
+from dotenv import load_dotenv
+load_dotenv('/home/ubuntu/advisor/.env')
 from db.database import query, execute, log
 from portfolio.sector_utils import normalize as normalize_sector, country_to_region, DEFAULT_REGION_TARGETS
 
-MAX_HOLDINGS = 10
+MAX_HOLDINGS = int(os.getenv('MAX_HOLDINGS', 10))
 MAX_SECTOR_PCT = 25          # fallback if no user target set for that sector
 MAX_COUNTRY_PCT = 40
 STRONG_CONVICTION_THRESHOLD = 0.70

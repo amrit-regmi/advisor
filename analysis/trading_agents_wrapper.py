@@ -41,8 +41,8 @@ OR_MODELS = [
     'nousresearch/hermes-3-llama-3.1-405b:free',     # last resort
 ]
 
-DAILY_TICKER_LIMIT = 20
-MAX_HOLDINGS       = 15
+DAILY_TICKER_LIMIT = int(os.getenv('DAILY_ANALYSIS_COUNT', 20))
+MAX_HOLDINGS       = int(os.getenv('MAX_HOLDINGS', 10))
 
 
 def _discover_keys(env_prefix: str) -> list[str]:
@@ -1001,13 +1001,13 @@ def save_recommendations(decisions: dict):
 
 
 if __name__ == '__main__':
-    from pipeline.daily_sixteen import build_daily_sixteen
+    from pipeline.daily_selection import build_daily_selection
     from pipeline.signal_engine import compute_signals_batch
     from pipeline.price_collector import fetch_and_store_prices
 
-    daily_set = build_daily_sixteen()
+    daily_set = build_daily_selection()
     if not daily_set:
-        print('No tickers from daily_sixteen — nothing to analyze')
+        print('No tickers from daily_selection — nothing to analyze')
     else:
         tickers = [item['ticker'] for item in daily_set]
 

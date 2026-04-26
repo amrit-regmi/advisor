@@ -4,6 +4,7 @@ Universe loader — uses adanos-software free-ticker-database (GitHub).
 Refresh: monthly for database download, weekly for yfinance validation.
 """
 import io
+import os
 import sys
 import time
 import json
@@ -13,33 +14,68 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, '/home/ubuntu/advisor')
+from dotenv import load_dotenv
+load_dotenv('/home/ubuntu/advisor/.env')
 from db.database import execute, query, log
 
 CACHE_DIR = Path('/home/ubuntu/advisor/data/universe_cache')
 DB_URL = 'https://raw.githubusercontent.com/adanos-software/free-ticker-database/main/data/tickers.csv'
 
-# Target exchanges: exchange_code -> (yf_suffix, country_code)
-TARGET_EXCHANGES = {
-    'NASDAQ': ('', 'US'),
-    'NYSE': ('', 'US'),
-    'AMEX': ('', 'US'),
-    'NYSE MKT': ('', 'US'),
+# Full exchange catalogue: exchange_code -> (yf_suffix, country_code)
+# Friendly alias used in UNIVERSE_MARKETS env var -> canonical code(s) it covers
+_ALL_EXCHANGES = {
+    'NASDAQ':    ('', 'US'),
+    'NYSE':      ('', 'US'),
+    'AMEX':      ('', 'US'),
+    'NYSE MKT':  ('', 'US'),   # alias for AMEX
     'NYSE ARCA': ('', 'US'),
-    'XETRA': ('.DE', 'DE'),
-    'FSX': ('.F', 'DE'),
-    'LSE': ('.L', 'GB'),
-    'LON': ('.L', 'GB'),
-    'SIX': ('.SW', 'CH'),
-    'HEL': ('.HE', 'FI'),
-    'XHEL': ('.HE', 'FI'),
-    'STO': ('.ST', 'SE'),
-    'XSTO': ('.ST', 'SE'),
-    'CPH': ('.CO', 'DK'),
-    'XCPH': ('.CO', 'DK'),
-    'FNSE': ('.ST', 'SE'),
-    'FNFI': ('.HE', 'FI'),
-    'FNDK': ('.CO', 'DK'),
+    'XETRA':     ('.DE', 'DE'),
+    'FSX':       ('.F', 'DE'),
+    'LSE':       ('.L', 'GB'),
+    'LON':       ('.L', 'GB'),
+    'SIX':       ('.SW', 'CH'),
+    'HEL':       ('.HE', 'FI'),
+    'XHEL':      ('.HE', 'FI'),
+    'STO':       ('.ST', 'SE'),
+    'XSTO':      ('.ST', 'SE'),
+    'CPH':       ('.CO', 'DK'),
+    'XCPH':      ('.CO', 'DK'),
+    'FNSE':      ('.ST', 'SE'),
+    'FNFI':      ('.HE', 'FI'),
+    'FNDK':      ('.CO', 'DK'),
 }
+
+# Aliases: short names users write in UNIVERSE_MARKETS -> codes in _ALL_EXCHANGES
+_ALIASES = {
+    'NYSE_MKT':  'NYSE MKT',
+    'NYSE_ARCA': 'NYSE ARCA',
+}
+
+
+def _build_target_exchanges() -> dict:
+    """Return the exchange dict filtered by the UNIVERSE_MARKETS env var."""
+    raw = os.getenv('UNIVERSE_MARKETS', '').strip()
+    if not raw:
+        return _ALL_EXCHANGES
+
+    wanted = set()
+    for token in raw.split(','):
+        token = token.strip().upper()
+        token = _ALIASES.get(token, token)  # resolve alias
+        wanted.add(token)
+        # Also include known sub-codes (e.g. HEL requested -> include XHEL too)
+        for code in list(_ALL_EXCHANGES):
+            if code.lstrip('X') == token.lstrip('X') or code == token:
+                wanted.add(code)
+
+    filtered = {k: v for k, v in _ALL_EXCHANGES.items() if k in wanted}
+    if not filtered:
+        log('WARNING', 'universe', f'UNIVERSE_MARKETS "{raw}" matched no known exchanges — using all')
+        return _ALL_EXCHANGES
+    return filtered
+
+
+TARGET_EXCHANGES = _build_target_exchanges()
 
 YF_BATCH_SIZE = 50
 MONTHLY_REFRESH_DAYS = 30

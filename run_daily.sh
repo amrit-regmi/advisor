@@ -16,7 +16,7 @@ STAGES=(
   "event_mapper:Event Mapper"
   "scorer:Candidate Scorer"
   "tax_filter:Finnish Tax Filter"
-  "daily_sixteen:Daily-16 Selection"
+  "daily_selection:Daily Selection"
   "trading_agents:TradingAgents Analysis"
   "reconciliation:Global Reconciliation"
   "optimizer:Portfolio Optimizer"
@@ -57,9 +57,9 @@ stage "tax_filter" "Finnish Tax Filter" "running"
 python pipeline/tax_filter.py
 stage "tax_filter" "Finnish Tax Filter" "done"
 
-stage "daily_sixteen" "Daily-16 Selection" "running"
-python pipeline/daily_sixteen.py
-stage "daily_sixteen" "Daily-16 Selection" "done"
+stage "daily_selection" "Daily Selection" "running"
+python pipeline/daily_selection.py
+stage "daily_selection" "Daily Selection" "done"
 
 stage "trading_agents" "TradingAgents Analysis (Groq+OpenRouter)" "running"
 python analysis/trading_agents_wrapper.py
