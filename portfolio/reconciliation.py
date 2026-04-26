@@ -11,10 +11,8 @@ from datetime import date, timedelta
 sys.path.insert(0, '/home/ubuntu/advisor')
 from dotenv import load_dotenv
 load_dotenv('/home/ubuntu/advisor/.env')
-from db.database import query, execute, log
+from db.database import query, execute, log, get_setting
 from portfolio.sector_utils import normalize as normalize_sector, country_to_region, DEFAULT_REGION_TARGETS
-
-MAX_HOLDINGS = int(os.getenv('MAX_HOLDINGS', 10))
 MAX_SECTOR_PCT = 25          # fallback if no user target set for that sector
 MAX_COUNTRY_PCT = 40
 STRONG_CONVICTION_THRESHOLD = 0.70
@@ -151,6 +149,7 @@ def reconcile(decisions: dict, contexts: dict) -> dict:
     Convert per-ticker decisions into trade_plan.
     Returns: {ticker: {action, shares_delta, reasoning, tax_notes, confidence}}
     """
+    MAX_HOLDINGS = get_setting('max_holdings', int(os.getenv('MAX_HOLDINGS', 10)))
     holdings = _get_holdings()
     holding_tickers = {h['ticker'] for h in holdings}
     n_holdings = len(holdings)

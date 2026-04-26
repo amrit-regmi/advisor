@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, '/home/ubuntu/advisor')
 from dotenv import load_dotenv
 load_dotenv('/home/ubuntu/advisor/.env')
-from db.database import execute, query, log
+from db.database import execute, query, log, get_setting
 
 CACHE_DIR = Path('/home/ubuntu/advisor/data/universe_cache')
 DB_URL = 'https://raw.githubusercontent.com/adanos-software/free-ticker-database/main/data/tickers.csv'
@@ -53,8 +53,8 @@ _ALIASES = {
 
 
 def _build_target_exchanges() -> dict:
-    """Return the exchange dict filtered by the UNIVERSE_MARKETS env var."""
-    raw = os.getenv('UNIVERSE_MARKETS', '').strip()
+    """Return the exchange dict filtered by UNIVERSE_MARKETS (DB overrides env)."""
+    raw = get_setting('universe_markets', os.getenv('UNIVERSE_MARKETS', '')).strip()
     if not raw:
         return _ALL_EXCHANGES
 

@@ -15,13 +15,11 @@ from datetime import date, timedelta
 sys.path.insert(0, '/home/ubuntu/advisor')
 from dotenv import load_dotenv
 load_dotenv('/home/ubuntu/advisor/.env')
-from db.database import query, log
+from db.database import query, log, get_setting
 from pipeline.signal_engine import compute_conviction
 
 STRONG_CONVICTION_THRESHOLD = 0.70
 WATCHLIST_CONVICTION_THRESHOLD = 0.55
-MAX_HOLDINGS = int(os.getenv('MAX_HOLDINGS', 10))
-TARGET_COUNT = int(os.getenv('DAILY_ANALYSIS_COUNT', 20))
 
 SLOTS = {
     'holdings': None,    # all holdings (no cap)
@@ -34,9 +32,9 @@ SLOTS = {
 
 def _analysis_exchange_filter():
     """Return (sql_fragment, params_tuple) for exchange filtering, or ('', ())."""
-    raw = os.getenv('ANALYSIS_MARKETS', '').strip()
+    raw = get_setting('analysis_markets', os.getenv('ANALYSIS_MARKETS', '')).strip()
     if not raw:
-        raw = os.getenv('UNIVERSE_MARKETS', '').strip()
+        raw = get_setting('universe_markets', os.getenv('UNIVERSE_MARKETS', '')).strip()
     if not raw:
         return ('', ())
     codes = tuple(c.strip().upper().replace('_', ' ') for c in raw.split(',') if c.strip())
@@ -89,6 +87,8 @@ def build_daily_selection() -> list:
     """
     Returns list of {ticker, state, conviction} dicts up to DAILY_ANALYSIS_COUNT entries.
     """
+    MAX_HOLDINGS = get_setting('max_holdings', int(os.getenv('MAX_HOLDINGS', 10)))
+    TARGET_COUNT = get_setting('daily_analysis_count', int(os.getenv('DAILY_ANALYSIS_COUNT', 20)))
     selected = []
     seen = set()
 
@@ -168,6 +168,6 @@ build_daily_sixteen = build_daily_selection
 
 if __name__ == '__main__':
     result = build_daily_selection()
-    print(f'\nDaily selection ({len(result)} tickers, target={TARGET_COUNT}, max_holdings={MAX_HOLDINGS}):')
+    print(f'\nDaily selection ({len(result)} tickers):')
     for item in result:
         print(f"  {item['ticker']:12s} {item['state']:15s} {item['conviction']:.3f}")

@@ -1888,6 +1888,154 @@ _SETTINGS = """
     </div>
   </div>
 
+  {# ── Portfolio Constraints ── #}
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">Portfolio Constraints</div>
+      <div class="card-body">
+        <form method="POST" action="/settings/constraints">
+          <div class="mb-3">
+            <label class="form-label">Min Trade Value (EUR)</label>
+            <input type="number" name="min_trade_value_eur" step="1" class="form-control"
+                   value="{{ smap.get('min_trade_value_eur') or '100' }}">
+            <div class="form-text">Buys below this are bumped up or demoted to WATCH. Nordnet Level 3 min fee is €7 — €100 keeps fees under 7%.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Max Holdings</label>
+            <input type="number" name="max_holdings" step="1" min="1" max="30" class="form-control"
+                   value="{{ smap.get('max_holdings') or '10' }}">
+            <div class="form-text">Maximum number of open positions.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Daily Analysis Count</label>
+            <input type="number" name="daily_analysis_count" step="1" min="5" max="50" class="form-control"
+                   value="{{ smap.get('daily_analysis_count') or '20' }}">
+            <div class="form-text">Tickers run through the full LLM debate each day. Higher = more LLM quota.</div>
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm">Save Constraints</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  {# ── Schedule ── #}
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-header">Pipeline Schedule (UTC)</div>
+      <div class="card-body">
+        <form method="POST" action="/settings/schedule">
+          <div class="mb-3">
+            <label class="form-label">Run Days</label>
+            <select name="schedule_days" class="form-select">
+              {% for val, label in [('1-5','Mon – Fri'),('1-7','Mon – Sun'),('*','Every day')] %}
+              <option value="{{ val }}" {{ 'selected' if (smap.get('schedule_days') or '1-5') == val else '' }}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Daily Pipeline</label>
+            <input type="time" name="schedule_daily_time" class="form-control"
+                   value="{{ smap.get('schedule_daily_time') or '04:00' }}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Morning Brief</label>
+            <input type="time" name="schedule_brief_time" class="form-control"
+                   value="{{ smap.get('schedule_brief_time') or '07:00' }}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Midday Check</label>
+            <input type="time" name="schedule_midday_time" class="form-control"
+                   value="{{ smap.get('schedule_midday_time') or '12:00' }}">
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm">Save &amp; Apply Cron</button>
+        </form>
+        <div class="mt-2" style="font-size:.78rem;color:var(--muted)">
+          Saving automatically updates the system crontab.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── Market Selection ── #}
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header">Market Selection</div>
+      <div class="card-body">
+        <form method="POST" action="/settings/markets">
+          <div class="row g-3">
+            {% set all_exchanges = [
+              ('Americas',  [('NASDAQ','NASDAQ'),('NYSE','NYSE'),('AMEX','AMEX')]),
+              ('Germany',   [('XETRA','XETRA'),('FSX','Frankfurt/FSX')]),
+              ('UK',        [('LSE','London/LSE')]),
+              ('Switzerland',[('SIX','SIX')]),
+              ('Finland',   [('HEL','Helsinki/HEL'),('FNFI','First North FI')]),
+              ('Sweden',    [('STO','Stockholm/STO'),('FNSE','First North SE')]),
+              ('Denmark',   [('CPH','Copenhagen/CPH'),('FNDK','First North DK')]),
+            ] %}
+            {% set uni_set = (smap.get('universe_markets') or 'NASDAQ,NYSE,AMEX,XETRA,LSE,SIX,HEL,STO,CPH').split(',') | map('trim') | list %}
+            {% set ana_set = (smap.get('analysis_markets') or '').split(',') | map('trim') | list %}
+
+            <div class="col-md-6">
+              <label class="form-label fw-semibold">Universe Markets <small class="text-muted">(download &amp; validate)</small></label>
+              <div class="row g-1">
+                {% for region, exchanges in all_exchanges %}
+                <div class="col-12"><small class="text-muted">{{ region }}</small></div>
+                {% for code, label in exchanges %}
+                <div class="col-auto">
+                  <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="checkbox" name="universe_markets"
+                           value="{{ code }}" id="uni_{{ code }}"
+                           {{ 'checked' if code in uni_set else '' }}>
+                    <label class="form-check-label" for="uni_{{ code }}" style="font-size:.85rem">{{ label }}</label>
+                  </div>
+                </div>
+                {% endfor %}
+                {% endfor %}
+              </div>
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label fw-semibold">Analysis Markets <small class="text-muted">(suggestions drawn from)</small></label>
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="anaAll" onchange="toggleAnaAll(this)"
+                       {{ 'checked' if not smap.get('analysis_markets') else '' }}>
+                <label class="form-check-label" for="anaAll" style="font-size:.85rem">Same as Universe Markets</label>
+              </div>
+              <div id="anaMarkets" style="{{ 'display:none' if not smap.get('analysis_markets') else '' }}">
+              <div class="row g-1">
+                {% for region, exchanges in all_exchanges %}
+                <div class="col-12"><small class="text-muted">{{ region }}</small></div>
+                {% for code, label in exchanges %}
+                <div class="col-auto">
+                  <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="checkbox" name="analysis_markets"
+                           value="{{ code }}" id="ana_{{ code }}"
+                           {{ 'checked' if code in ana_set else '' }}>
+                    <label class="form-check-label" for="ana_{{ code }}" style="font-size:.85rem">{{ label }}</label>
+                  </div>
+                </div>
+                {% endfor %}
+                {% endfor %}
+              </div>
+              </div>
+            </div>
+
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm mt-3">Save Markets</button>
+        </form>
+        <div class="mt-2" style="font-size:.78rem;color:var(--muted)">
+          Universe changes take effect on the next monthly refresh. Analysis market changes apply from the next daily run.
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+function toggleAnaAll(cb) {
+  document.getElementById('anaMarkets').style.display = cb.checked ? 'none' : '';
+}
+</script>
+
   {# ── Danger Zone ── #}
   <div class="col-12">
     <div class="card" style="border-color:var(--red)">
@@ -2479,6 +2627,67 @@ def settings_simulation():
     else:
         flash('Simulation disabled.')
     log('INFO', 'dashboard', f'Simulation settings updated: simulate={simulate}')
+    return redirect(url_for('settings'))
+
+
+@app.route('/settings/constraints', methods=['POST'])
+def settings_constraints():
+    for key in ('min_trade_value_eur', 'max_holdings', 'daily_analysis_count'):
+        val = request.form.get(key, '').strip()
+        if val:
+            _upsert_setting(key, val)
+    log('INFO', 'dashboard', 'Portfolio constraints updated')
+    flash('Portfolio constraints saved.')
+    return redirect(url_for('settings'))
+
+
+@app.route('/settings/schedule', methods=['POST'])
+def settings_schedule():
+    import subprocess
+    keys = ('schedule_days', 'schedule_daily_time', 'schedule_brief_time', 'schedule_midday_time')
+    vals = {k: request.form.get(k, '').strip() for k in keys}
+    for k, v in vals.items():
+        if v:
+            _upsert_setting(k, v)
+
+    days   = vals.get('schedule_days') or '1-5'
+    daily  = vals.get('schedule_daily_time') or '04:00'
+    brief  = vals.get('schedule_brief_time') or '07:00'
+    midday = vals.get('schedule_midday_time') or '12:00'
+
+    def to_cron(t):
+        h, m = t.split(':')
+        return f'{int(m)} {int(h)}'
+
+    advisor = '/home/ubuntu/advisor'
+    venv    = '/home/ubuntu/venv'
+    entries = [
+        f"{to_cron(daily)} * * {days} {advisor}/run_daily.sh >> {advisor}/logs/daily.log 2>&1",
+        f"{to_cron(brief)} * * {days} {advisor}/send_brief.sh >> {advisor}/logs/brief.log 2>&1",
+        f"{to_cron(midday)} * * {days} {advisor}/run_midday.sh >> {advisor}/logs/midday.log 2>&1",
+        f"0 5 * * 0 source {venv}/bin/activate && cd {advisor} && python pipeline/backtester.py >> {advisor}/logs/backtest.log 2>&1",
+    ]
+    new_cron = '\n'.join(entries)
+    script = f"(crontab -l 2>/dev/null | grep -v '{advisor}' || true; printf '%s\\n' {chr(39)}{new_cron}{chr(39)}) | crontab -"
+    try:
+        subprocess.run(['bash', '-c', script], check=True, timeout=10)
+        log('INFO', 'dashboard', f'Cron updated: daily={daily} brief={brief} midday={midday} days={days}')
+        flash(f'Schedule saved and cron updated — daily {daily}, brief {brief}, midday {midday} UTC on days {days}.')
+    except Exception as e:
+        log('WARNING', 'dashboard', f'Cron update failed: {e}')
+        flash(f'Settings saved but cron update failed: {e}')
+    return redirect(url_for('settings'))
+
+
+@app.route('/settings/markets', methods=['POST'])
+def settings_markets():
+    uni = ','.join(v.strip() for v in request.form.getlist('universe_markets') if v.strip())
+    ana = ','.join(v.strip() for v in request.form.getlist('analysis_markets') if v.strip())
+    if uni:
+        _upsert_setting('universe_markets', uni)
+    _upsert_setting('analysis_markets', ana)  # empty string = same as universe
+    log('INFO', 'dashboard', f'Markets updated: universe={uni or "all"} analysis={ana or "same as universe"}')
+    flash('Market selection saved.')
     return redirect(url_for('settings'))
 
 

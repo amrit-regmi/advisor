@@ -24,7 +24,7 @@ from db.database import query, execute, log
 from portfolio.optimizer import optimize_candidates, get_weight_hint
 from portfolio.sector_utils import normalize as normalize_sector, country_to_region, DEFAULT_REGION_TARGETS
 
-MIN_TRADE_VALUE_EUR = float(os.getenv('MIN_TRADE_VALUE_EUR', 50))
+_MIN_TRADE_VALUE_DEFAULT = float(os.getenv('MIN_TRADE_VALUE_EUR', 100))
 
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
@@ -916,7 +916,7 @@ def build_brief():
     spent_eur = 0.0
     for score, ticker, cand, reason, conf in final_buys:
         remaining_budget = (budget - spent_eur) * size_mult
-        if remaining_budget < MIN_TRADE_VALUE_EUR:
+        if remaining_budget < _setting('min_trade_value_eur', _MIN_TRADE_VALUE_DEFAULT):
             break
 
         # Conviction gate: TradingAgents BUY is sufficient on its own.
@@ -985,6 +985,7 @@ def build_brief():
         shares, price_eur, cost = sizing
 
         # Enforce minimum trade value — broker min fees make tiny trades uneconomical
+        MIN_TRADE_VALUE_EUR = _setting('min_trade_value_eur', _MIN_TRADE_VALUE_DEFAULT)
         if cost < MIN_TRADE_VALUE_EUR:
             min_shares = math.ceil(MIN_TRADE_VALUE_EUR / price_eur)
             min_cost = round(min_shares * price_eur, 2)

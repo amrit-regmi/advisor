@@ -74,6 +74,17 @@ def get_api_calls_today(api_name):
     return result[0]['call_count'] if result else 0
 
 
+def get_setting(key, default):
+    """Read a user_settings value, cast to the same type as default. Falls back to default on any error."""
+    try:
+        rows = query("SELECT value FROM user_settings WHERE key=%s", (key,))
+        if rows and rows[0]['value'] not in (None, ''):
+            return type(default)(rows[0]['value'])
+    except Exception:
+        pass
+    return default
+
+
 def can_use_alpha_vantage():
     """Alpha Vantage free tier caps at 25 req/day; we stay under with a 22-call limit."""
     limit = int(os.getenv('MAX_ALPHA_VANTAGE_CALLS', 22))

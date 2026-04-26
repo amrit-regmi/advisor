@@ -41,8 +41,8 @@ OR_MODELS = [
     'nousresearch/hermes-3-llama-3.1-405b:free',     # last resort
 ]
 
-DAILY_TICKER_LIMIT = int(os.getenv('DAILY_ANALYSIS_COUNT', 20))
-MAX_HOLDINGS       = int(os.getenv('MAX_HOLDINGS', 10))
+_DAILY_TICKER_LIMIT_DEFAULT = int(os.getenv('DAILY_ANALYSIS_COUNT', 20))
+_MAX_HOLDINGS_DEFAULT       = int(os.getenv('MAX_HOLDINGS', 10))
 
 
 def _discover_keys(env_prefix: str) -> list[str]:
@@ -867,6 +867,9 @@ def analyze_daily_set(daily_set: list, signals: dict) -> dict:
     signals:   {ticker: {conviction: float}}
     Returns:   {ticker: pm_final_decision}
     """
+    from db.database import get_setting
+    DAILY_TICKER_LIMIT = get_setting('daily_analysis_count', _DAILY_TICKER_LIMIT_DEFAULT)
+    MAX_HOLDINGS       = get_setting('max_holdings', _MAX_HOLDINGS_DEFAULT)
     results  = {}
     rate_mgr = get_manager()
     cap      = min(len(daily_set), DAILY_TICKER_LIMIT)
