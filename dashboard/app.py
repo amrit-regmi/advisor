@@ -1129,9 +1129,9 @@ _PIPELINE = """
         &#8635; Reload Universe
       </button>
     </form>
-    <form method="POST" action="/run-pipeline" id="pipelineForm" style="display:inline">
-      <button class="btn btn-sm btn-outline-success px-3" id="runPipelineBtn"
-              onclick="this.textContent='⏳ Starting…';this.disabled=true">
+    <form method="POST" action="/run-pipeline" id="pipelineForm" style="display:inline"
+          onsubmit="var b=document.getElementById('runPipelineBtn');b.textContent='⏳ Starting…';b.disabled=true;">
+      <button type="submit" class="btn btn-sm btn-outline-success px-3" id="runPipelineBtn">
         &#9654; Run Pipeline Now
       </button>
     </form>

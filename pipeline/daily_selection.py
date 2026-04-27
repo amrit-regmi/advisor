@@ -68,19 +68,114 @@ def _get_discovery_candidates(exclude: set) -> list:
     return [r['ticker'] for r in rows]
 
 
-def _get_universe_rotation_fill(exclude: set, n: int) -> list:
+def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = None, max_holdings: int = 10) -> list:
+    """
+    Fill remaining analysis slots from the universe with portfolio-aware diversity caps.
+
+    Caps are derived from actual portfolio headroom rather than a fixed % of analysis slots:
+      sector_analysis_cap  = holdings_in_sector + max(1, headroom * 2)
+      country_analysis_cap = holdings_in_country + max(1, headroom * 2)
+
+    This means:
+    - Sectors with lots of portfolio room get more analysis candidates (high-signal sectors
+      like Tech naturally dominate when there is room).
+    - Sectors at portfolio cap still get 1 rotation buffer slot (potential replacement).
+    - Sectors already covered by holdings/watchlist count toward the cap automatically,
+      so we never double-analyze the same name.
+
+    Portfolio limits mirror reconciliation: 25% weight per sector, 40% per country.
+    """
     if n <= 0:
         return []
+
+    already_selected = already_selected or []
+
+    # Single meta query for all already-selected tickers
+    all_tickers = [item['ticker'] for item in already_selected]
+    meta_map: dict = {}
+    if all_tickers:
+        meta = query("SELECT ticker, sector, country FROM universe WHERE ticker IN %s", (tuple(all_tickers),))
+        meta_map = {r['ticker']: r for r in meta}
+
+    def _sc(ticker: str) -> tuple:
+        r = meta_map.get(ticker, {})
+        return (
+            (r.get('sector') or 'Unknown').split('-')[0],  # normalise ETF-* → ETF
+            r.get('country') or 'Unknown',
+        )
+
+    # Portfolio state: only current holdings → determines headroom
+    port_sector_counts: dict = {}
+    port_country_counts: dict = {}
+    for item in already_selected:
+        if item.get('state') == 'holding':
+            s, c = _sc(item['ticker'])
+            port_sector_counts[s]  = port_sector_counts.get(s, 0)  + 1
+            port_country_counts[c] = port_country_counts.get(c, 0) + 1
+
+    port_sector_cap  = max(1, int(max_holdings * 0.25))   # e.g. 2 for 10 holdings
+    port_country_cap = max(2, int(max_holdings * 0.40))   # e.g. 4 for 10 holdings
+
+    def sector_analysis_cap(sector: str) -> int:
+        h_count  = port_sector_counts.get(sector, 0)
+        headroom = max(0, port_sector_cap - h_count)
+        return h_count + max(1, headroom * 2)
+
+    def country_analysis_cap(country: str) -> int:
+        h_count  = port_country_counts.get(country, 0)
+        headroom = max(0, port_country_cap - h_count)
+        return h_count + max(1, headroom * 2)
+
+    # Seed counts from ALL already-selected (holdings, watchlist, strong_override, discovery)
+    sector_counts: dict = {}
+    country_counts: dict = {}
+    for item in already_selected:
+        s, c = _sc(item['ticker'])
+        sector_counts[s]  = sector_counts.get(s, 0)  + 1
+        country_counts[c] = country_counts.get(c, 0) + 1
+
+    # Fetch a large diverse pool to score from
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
     exc_fragment, exc_params = _EXCHANGE_FILTER
-    # Fetch 3× needed then score — avoids always surfacing the same low-conviction tickers
     rows = query(
-        f"SELECT ticker FROM universe WHERE active = true AND ticker NOT IN %s{exc_fragment} ORDER BY RANDOM() LIMIT %s",
-        (exc_tuple, *exc_params, n * 3),
+        f"""SELECT u.ticker, u.sector, u.country
+            FROM universe u
+            WHERE u.active = true AND u.ticker NOT IN %s{exc_fragment}
+            ORDER BY RANDOM() LIMIT %s""",
+        (exc_tuple, *exc_params, n * 6),
     )
-    candidates = [r['ticker'] for r in rows]
-    scored = sorted(((t, compute_conviction(t)) for t in candidates[:30]), key=lambda x: -x[1])
-    return [t for t, _ in scored[:n]]
+
+    pool = [(r['ticker'], (r['sector'] or 'Unknown').split('-')[0], r['country'] or 'Unknown')
+            for r in rows]
+    scored = sorted(
+        ((t, compute_conviction(t), s, c) for t, s, c in pool[:60]),
+        key=lambda x: -x[1],
+    )
+
+    # Pick greedily by conviction while respecting portfolio-aware caps
+    result = []
+    for t, _conv, sector, country in scored:
+        if len(result) >= n:
+            break
+        if sector_counts.get(sector, 0) >= sector_analysis_cap(sector):
+            continue
+        if country_counts.get(country, 0) >= country_analysis_cap(country):
+            continue
+        result.append(t)
+        sector_counts[sector]  = sector_counts.get(sector, 0)  + 1
+        country_counts[country] = country_counts.get(country, 0) + 1
+
+    # Safety: if caps left unfilled slots, top-up without constraints
+    if len(result) < n:
+        used = set(result) | exclude
+        for t, _conv, _s, _c in scored:
+            if t not in used:
+                result.append(t)
+                used.add(t)
+            if len(result) >= n:
+                break
+
+    return result
 
 
 def build_daily_selection() -> list:
@@ -144,10 +239,10 @@ def build_daily_selection() -> list:
                 seen.add(t)
         log('daily_selection', 'info', f'Discovery: {min(len(discovery), SLOTS["discovery"])} added')
 
-    # 5. Rotation fill to reach TARGET_COUNT
+    # 5. Rotation fill to reach TARGET_COUNT — diversity-aware
     shortage = TARGET_COUNT - len(selected)
     if shortage > 0:
-        fill = _get_universe_rotation_fill(seen, shortage)
+        fill = _get_universe_rotation_fill(seen, shortage, already_selected=selected, max_holdings=MAX_HOLDINGS)
         for t in fill:
             if t not in seen:
                 c = compute_conviction(t)
