@@ -4769,13 +4769,17 @@ def update_cash():
 
 
 def _pipeline_is_running():
-    """Return True if run_daily.sh is currently active."""
-    import subprocess as _sp
+    """Return True if run_daily.sh is currently holding the pipeline lock."""
+    import fcntl, os
+    lock_path = '/tmp/advisor_daily.lock'
     try:
-        out = _sp.check_output(['pgrep', '-f', 'run_daily.sh'], text=True)
-        return bool(out.strip())
-    except Exception:
-        return False
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        return False  # lock acquired → pipeline not running
+    except (IOError, OSError):
+        return True   # lock held by run_daily.sh
 
 
 @app.route('/reload-universe', methods=['POST'])
