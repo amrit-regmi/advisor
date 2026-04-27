@@ -46,17 +46,15 @@ WATCHLIST = {
 
 
 def get_watchlist():
-    """Read watchlist from DB, fall back to WATCHLIST constant."""
+    """Read watchlist from DB. Returns empty dict if watchlist is empty or DB unavailable."""
     try:
         import sys
         sys.path.insert(0, '/home/ubuntu/advisor')
         from db.database import query
         rows = query("SELECT ticker, company_name FROM watchlist WHERE active=TRUE")
-        if rows:
-            return {r['ticker']: r['company_name'] or r['ticker'] for r in rows}
+        return {r['ticker']: r['company_name'] or r['ticker'] for r in rows}
     except Exception:
-        pass
-    return WATCHLIST
+        return {}
 
 
 def get_setting(key, default=None):

@@ -9,13 +9,9 @@ import pipeline.price_collector as prices
 
 
 def get_watchlist():
-    """Read active watchlist from DB, fall back to config.py."""
+    """Read active watchlist from DB. Returns empty dict if watchlist is empty."""
     rows = query("SELECT ticker, company_name FROM watchlist WHERE active=TRUE")
-    if rows:
-        return {r['ticker']: r['company_name'] or r['ticker'] for r in rows}
-    # Fallback
-    from config import WATCHLIST
-    return WATCHLIST
+    return {r['ticker']: r['company_name'] or r['ticker'] for r in rows}
 
 
 def get_discovery_tickers():
