@@ -207,6 +207,40 @@ def compute_signals_batch(tickers: list) -> dict:
     return results
 
 
+def compute_drp(
+    sector: str,
+    candidate_sector_counts: dict,
+    target_weights: dict,
+    N: int,
+    alpha: float = 0.10,
+    rotation_mode: bool = False,
+    held_sectors: set = None,
+) -> float:
+    """
+    Diminishing Returns Penalty — softly penalises over-representation of a sector
+    in the current candidate shortlist.
+
+    Formula:
+        threshold = 2 × target_weight[sector] × N
+        excess    = max(0, current_count[sector] - threshold)
+        penalty   = alpha × excess
+
+    Works on whichever score scale the caller uses (0-1 or 0-100); alpha should
+    be chosen to match (default 0.10 suits a 0-1 conviction scale; use ~10 for
+    a 0-100 discovery score scale).
+
+    Rotation-mode exemption: if rotation_mode=True and the candidate's sector is
+    already held (intra-sector rotation), DRP is suppressed so replacement
+    candidates always surface.  Cross-sector candidates keep the penalty.
+    """
+    if rotation_mode and held_sectors and sector in held_sectors:
+        return 0.0
+    tgt = float(target_weights.get(sector, 0.25))
+    threshold = 2.0 * tgt * N
+    excess = max(0, candidate_sector_counts.get(sector, 0) - threshold)
+    return round(alpha * excess, 4)
+
+
 if __name__ == '__main__':
     import sys
     tickers = sys.argv[1:] if len(sys.argv) > 1 else ['AAPL', 'NVDA', 'NOKIA.HE']

@@ -17,7 +17,7 @@ sys.path.insert(0, '/home/ubuntu/advisor')
 from dotenv import load_dotenv
 load_dotenv('/home/ubuntu/advisor/.env')
 from db.database import query, execute, log, get_setting
-from pipeline.signal_engine import compute_conviction
+from pipeline.signal_engine import compute_conviction, compute_drp
 from portfolio.sector_utils import country_to_region, DEFAULT_REGION_TARGETS
 
 STRONG_CONVICTION_THRESHOLD = 0.70
@@ -209,6 +209,11 @@ def _get_discovery_candidates(exclude: set, already_selected: list = None, max_h
     """, (date.today() - timedelta(days=1), exc_tuple))
 
     # Normalise total_score (0-100) to 0-1 range for the adjuster
+    _st = query("SELECT value FROM user_settings WHERE key='sector_targets'")
+    import json as _j
+    _sector_targets_raw: dict = _j.loads(_st[0]['value']) if _st and _st[0]['value'] else {}
+    target_weights = {s: float(v) / 100 for s, v in _sector_targets_raw.items()}
+
     candidates = []
     for r in rows:
         sector = (r['sector'] or 'Unknown').split('-')[0]
@@ -217,17 +222,33 @@ def _get_discovery_candidates(exclude: set, already_selected: list = None, max_h
         adj    = adjust_score(raw, sector, region)
         candidates.append((r['ticker'], adj, sector, region))
 
-    candidates.sort(key=lambda x: -x[1])
-
+    # Iterative greedy selection with Diminishing Returns Penalty (DRP).
+    # Scores are recomputed at each step so the penalty reflects the actual
+    # sector composition of what has been selected so far.
+    N_discovery = SLOTS.get('discovery', 2)
+    candidate_sector_counts: dict = {}
+    remaining = list(candidates)
     result = []
-    for t, _adj, sector, region in candidates:
-        if sector_counts.get(sector, 0) >= sector_cap(sector):
-            continue
-        if region_counts.get(region, 0) >= region_cap(region):
-            continue
-        result.append(t)
-        sector_counts[sector] = sector_counts.get(sector, 0) + 1
-        region_counts[region] = region_counts.get(region, 0) + 1
+
+    while remaining:
+        best_t, best_adj, best_sector, best_region = None, float('-inf'), None, None
+        for t, adj, sector, region in remaining:
+            if sector_counts.get(sector, 0) >= sector_cap(sector):
+                continue
+            if region_counts.get(region, 0) >= region_cap(region):
+                continue
+            drp = compute_drp(sector, candidate_sector_counts, target_weights,
+                              N_discovery, alpha=0.10)
+            score = adj - drp
+            if score > best_adj:
+                best_t, best_adj, best_sector, best_region = t, score, sector, region
+        if best_t is None:
+            break
+        result.append(best_t)
+        remaining = [(t, a, s, r) for t, a, s, r in remaining if t != best_t]
+        sector_counts[best_sector] = sector_counts.get(best_sector, 0) + 1
+        region_counts[best_region] = region_counts.get(best_region, 0) + 1
+        candidate_sector_counts[best_sector] = candidate_sector_counts.get(best_sector, 0) + 1
 
     return result
 
@@ -254,18 +275,37 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
 
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
     exc_fragment, exc_params = _EXCHANGE_FILTER
+
+    # Build a signal-ranked candidate pool:
+    # Priority 1 — recent discovery candidates (already scored by signal engine)
+    # Priority 2 — tickers with recent news sentiment (the signal engine ran on them)
+    # Priority 3 — tickers with recent price data (actively traded)
+    # Within each tier, sort by pre-computed signal score descending.
     rows = query(
-        f"""SELECT u.ticker, u.sector, u.country
+        f"""SELECT u.ticker, u.sector, u.country,
+               COALESCE((
+                   SELECT MAX(dc.total_score)
+                   FROM discovery_candidates dc
+                   WHERE dc.ticker = u.ticker AND dc.date >= CURRENT_DATE - 7
+               ), 0) AS disc_score,
+               COALESCE((
+                   SELECT AVG(ns.avg_tone + COALESCE(ns.finbert_sentiment_score, 0))
+                   FROM news_sentiment ns
+                   WHERE ns.ticker = u.ticker AND ns.date >= CURRENT_DATE - 7
+               ), 0) AS sentiment_score,
+               EXISTS(SELECT 1 FROM prices p WHERE p.ticker = u.ticker
+                      AND p.date >= CURRENT_DATE - 7) AS has_prices
             FROM universe u
             WHERE u.active = true AND u.ticker NOT IN %s{exc_fragment}
-            ORDER BY RANDOM() LIMIT %s""",
+            ORDER BY disc_score DESC, sentiment_score DESC, has_prices DESC, RANDOM()
+            LIMIT %s""",
         (exc_tuple, *exc_params, n * 6),
     )
 
     pool = [(r['ticker'], (r['sector'] or 'Unknown').split('-')[0], r['country'] or 'Unknown')
             for r in rows]
 
-    # Score then re-rank with portfolio adjustments
+    # Conviction-score the pool with portfolio adjustments
     scored = []
     for t, s, c in pool[:60]:
         raw = compute_conviction(t)
@@ -274,22 +314,48 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
         scored.append((t, adj, s, region))
     scored.sort(key=lambda x: -x[1])
 
-    result = []
-    for t, _adj, sector, region in scored:
-        if len(result) >= n:
-            break
-        if sector_counts.get(sector, 0) >= sector_cap(sector):
-            continue
-        if region_counts.get(region, 0) >= region_cap(region):
-            continue
-        result.append(t)
-        sector_counts[sector] = sector_counts.get(sector, 0) + 1
-        region_counts[region] = region_counts.get(region, 0) + 1
+    # Load sector targets for DRP
+    import json as _j2
+    _st2 = query("SELECT value FROM user_settings WHERE key='sector_targets'")
+    _sector_targets_raw2: dict = _j2.loads(_st2[0]['value']) if _st2 and _st2[0]['value'] else {}
+    target_weights2 = {s: float(v) / 100 for s, v in _sector_targets_raw2.items()}
 
-    # Safety: if caps left unfilled slots, top-up without constraints
+    # Sectors already represented in holdings (intra-sector rotation is DRP-exempt)
+    held_sectors = {
+        item.get('sector', '') or ''
+        for item in already_selected if item.get('state') == 'holding'
+    }
+
+    # Iterative greedy selection with DRP — recompute penalty each step
+    candidate_sector_counts: dict = {}
+    remaining = list(scored)
+    result = []
+
+    while len(result) < n and remaining:
+        best_t, best_score, best_sector, best_region = None, float('-inf'), None, None
+        for t, adj, sector, region in remaining:
+            if sector_counts.get(sector, 0) >= sector_cap(sector):
+                continue
+            if region_counts.get(region, 0) >= region_cap(region):
+                continue
+            drp = compute_drp(sector, candidate_sector_counts, target_weights2, n,
+                              alpha=0.10, rotation_mode=rotation_mode,
+                              held_sectors=held_sectors)
+            score = adj - drp
+            if score > best_score:
+                best_t, best_score, best_sector, best_region = t, score, sector, region
+        if best_t is None:
+            break
+        result.append(best_t)
+        remaining = [(t, a, s, r) for t, a, s, r in remaining if t != best_t]
+        sector_counts[best_sector] = sector_counts.get(best_sector, 0) + 1
+        region_counts[best_region] = region_counts.get(best_region, 0) + 1
+        candidate_sector_counts[best_sector] = candidate_sector_counts.get(best_sector, 0) + 1
+
+    # Safety top-up without constraints (fills any cap-blocked gaps)
     if len(result) < n:
         used = set(result) | exclude
-        for t, _conv, _s, _c in scored:
+        for t, _adj, _s, _c in scored:
             if t not in used:
                 result.append(t)
                 used.add(t)

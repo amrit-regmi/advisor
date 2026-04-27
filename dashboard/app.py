@@ -5383,12 +5383,10 @@ def portfolio():
         h['region'] = country_to_region(country)
         h['sector'] = _normalize_sector(h['sector'] or 'Unknown')
 
-    # P&L totals
-    total_cost = sum(
-        h['shares'] * h['avg_buy'] * fx.get(h['currency'] or 'EUR', fx.get('USD', 0.853))
-        for h in holdings
-    )
-    total_pnl = total_value - total_cost
+    # P&L totals — use per-holding pnl already computed by get_holdings_enriched()
+    # with a consistent FX rate, rather than a second fx call that can diverge.
+    total_pnl = sum(h['pnl'] for h in holdings)
+    total_cost = total_value - total_pnl
     total_pnl_pct = (total_pnl / total_cost * 100) if total_cost else 0.0
 
     # Sector & region breakdown (% of portfolio value)

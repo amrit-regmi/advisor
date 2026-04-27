@@ -32,35 +32,37 @@ def _execute_buy(rec, brief_buy):
     ticker = rec['ticker']
     shares = brief_buy.get('shares', 0)
     price_eur = brief_buy.get('price_eur', 0)
+    # Use native price if available; fall back to EUR price (legacy)
+    price_store = brief_buy.get('price_native', price_eur)
     currency = brief_buy.get('currency', 'EUR')
 
     if not shares or not price_eur:
         log('WARNING', 'auto_executor', f'{ticker}: missing shares/price — skipping BUY')
         return False
 
-    # Log to trades
+    # Log to trades in native currency
     execute("""
         INSERT INTO trades (ticker, action, shares, price, currency, trade_date, notes)
         VALUES (%s, 'BUY', %s, %s, %s, %s, 'Auto-executed by advisor')
-    """, (ticker, shares, price_eur, currency, date.today()))
+    """, (ticker, shares, price_store, currency, date.today()))
 
-    # Upsert holdings — weighted avg cost
+    # Upsert holdings — weighted avg cost in native currency
     existing = query("SELECT shares, avg_buy_price FROM holdings WHERE ticker=%s AND active=TRUE",
                      (ticker,))
     if existing:
         old_shares = float(existing[0]['shares'])
-        old_price = float(existing[0]['avg_buy_price'] or price_eur)
+        old_price = float(existing[0]['avg_buy_price'] or price_store)
         new_shares = old_shares + shares
-        new_avg = ((old_shares * old_price) + (shares * price_eur)) / new_shares
+        new_avg = ((old_shares * old_price) + (shares * price_store)) / new_shares
         execute("""
-            UPDATE holdings SET shares=%s, avg_buy_price=%s, updated_at=NOW()
+            UPDATE holdings SET shares=%s, avg_buy_price=%s, currency=%s, updated_at=NOW()
             WHERE ticker=%s AND active=TRUE
-        """, (new_shares, round(new_avg, 4), ticker))
+        """, (new_shares, round(new_avg, 4), currency, ticker))
     else:
         execute("""
             INSERT INTO holdings (ticker, shares, avg_buy_price, currency, bought_date, notes)
             VALUES (%s, %s, %s, %s, %s, 'Auto-executed')
-        """, (ticker, shares, price_eur, currency, date.today()))
+        """, (ticker, shares, price_store, currency, date.today()))
 
     # Reduce cash balance
     cost = shares * price_eur

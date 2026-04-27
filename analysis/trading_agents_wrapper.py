@@ -367,14 +367,14 @@ def _analyst_news(d: str) -> str:
 def _debate_four_rounds(d: str, mkt: str, news: str) -> tuple[str, str]:
     """4-round Bull vs Bear on Groq. Returns (bull_summary, bear_summary)."""
     ctx = f"{d} MKT:{mkt[:120]} NEWS:{news[:120]}"
-    bear1 = _call_groq(f"Bear: 3 specific risks with evidence. 70 words.\n{ctx}", max_tokens=110)
+    bear1 = _call_groq(f"Bear: 3 specific risks with evidence. 70 words.\n{ctx}", max_tokens=150)
     time.sleep(1)   # pace calls to stay within Groq's 28 RPM limit
-    bull1 = _call_groq(f"Bull: counter each bear risk with data. 70 words.\n{ctx}\nBear:{bear1[:110]}", max_tokens=110)
+    bull1 = _call_groq(f"Bull: counter each bear risk with data. 70 words.\n{ctx}\nBear:{bear1[:150]}", max_tokens=150)
     time.sleep(1)
-    bear2 = _call_groq(f"Bear: rebut bull, sharpen thesis. 70 words.\n{ctx}\nBull:{bull1[:110]}", max_tokens=110)
+    bear2 = _call_groq(f"Bear: rebut bull, sharpen thesis. 70 words.\n{ctx}\nBull:{bull1[:150]}", max_tokens=150)
     time.sleep(1)
-    bull2 = _call_groq(f"Bull: closing argument with conviction. 70 words.\n{ctx}\nBear2:{bear2[:110]}", max_tokens=110)
-    return (f"R1:{bull1[:140]}|R2:{bull2[:140]}", f"R1:{bear1[:140]}|R2:{bear2[:140]}")
+    bull2 = _call_groq(f"Bull: closing argument with conviction. 70 words.\n{ctx}\nBear2:{bear2[:150]}", max_tokens=150)
+    return (f"R1:{bull1}|R2:{bull2}", f"R1:{bear1}|R2:{bear2}")
 
 
 def _evaluator_groq(d: str, bull: str, bear: str) -> str:

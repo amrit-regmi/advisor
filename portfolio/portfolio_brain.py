@@ -799,8 +799,13 @@ def build_brief():
             # Create a minimal pseudo-discovery entry for downstream sizing
             uni = query("SELECT sector, company_name, country, exchange FROM universe WHERE ticker=%s LIMIT 1", (ta_ticker,))
             _exchange = (uni[0]['exchange'] or '') if uni else ''
+            _EUR_EXCHANGES = ('XETRA', 'ETR', 'GER', 'EURONEXT', 'HEL', 'STO', 'CPH',
+                              'FIRST NORTH', 'NASDAQ HELSINKI', 'NASDAQ STOCKHOLM')
+            _EUR_SUFFIXES  = ('.DE', '.PA', '.HE', '.ST', '.CO', '.SW', '.AS', '.BR',
+                              '.LS', '.MI', '.VI', '.WA')
             _ccy = 'GBP' if _exchange in ('LSE', 'LON') or ta_ticker.endswith('.L') else \
-                   'EUR' if _exchange in ('XETRA', 'ETR', 'GER') or ta_ticker.endswith('.DE') else \
+                   'EUR' if (_exchange.upper() in _EUR_EXCHANGES or
+                             any(ta_ticker.upper().endswith(s.upper()) for s in _EUR_SUFFIXES)) else \
                    'USD'
             _raw_sector = (uni[0]['sector'] if uni else '') or ''
             d = {
@@ -1026,6 +1031,12 @@ def build_brief():
             f'BUY {ticker}: {shares} shares @ €{price_eur:.2f} = €{cost:.0f} '
             f'(deployed: €{spent_eur:.0f}/{budget:.0f})')
 
+        _native_ccy = cand.get('currency', 'USD')
+        # Query close directly — avoids EUR→native round-trip that causes P&L drift
+        # when _fx() is called twice and returns slightly different rates.
+        _pr = query("SELECT close FROM prices WHERE ticker=%s ORDER BY date DESC LIMIT 1", (ticker,))
+        _native_price = float(_pr[0]['close']) if _pr else round(
+            price_eur / _fx().get(_native_ccy, _fx().get('USD', 0.92)), 4)
         buys.append({
             'ticker':          ticker,
             'company_name':    cand.get('company_name', ticker),
@@ -1033,6 +1044,8 @@ def build_brief():
             'action':          'BUY',
             'shares':          shares,
             'price_eur':       price_eur,
+            'price_native':    _native_price,
+            'currency':        _native_ccy,
             'total_cost_eur':  cost,
             'confidence':      conf,
             'reasoning':       full_reason,

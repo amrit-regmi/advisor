@@ -70,7 +70,7 @@ def _country_exposure(holdings: list) -> dict:
     return exposure
 
 
-def _would_breach_sector(ticker: str, holdings: list) -> bool:
+def _would_breach_sector(ticker: str, holdings: list, max_holdings: int = 10) -> bool:
     """Block if adding ticker would exceed the user-configured sector target.
     Uses absolute count ceiling derived from sector target %; falls back to
     MAX_SECTOR_PCT if no target is configured for that sector."""
@@ -82,7 +82,7 @@ def _would_breach_sector(ticker: str, holdings: list) -> bool:
         return True  # sector is explicitly excluded
     # Convert to max position count (ceil so first position is always allowed)
     effective_pct = min(tgt_pct + 5, 40)  # 5% tolerance; hard cap at 40%
-    max_in_sector = max(1, round(MAX_HOLDINGS * effective_pct / 100))
+    max_in_sector = max(1, round(max_holdings * effective_pct / 100))
     exposure = _sector_exposure(holdings)
     return (exposure.get(sec, 0) + 1) > max_in_sector
 
@@ -97,7 +97,7 @@ def _region_exposure(holdings: list) -> dict:
     return exposure
 
 
-def _would_breach_country(ticker: str, holdings: list) -> bool:
+def _would_breach_country(ticker: str, holdings: list, max_holdings: int = 10) -> bool:
     """Block if adding ticker would exceed user-configured region target.
     Falls back to MAX_COUNTRY_PCT if no region target is set."""
     region_targets = _load_region_targets()
@@ -105,7 +105,7 @@ def _would_breach_country(ticker: str, holdings: list) -> bool:
     region = country_to_region(ctry)
     tgt_pct = float(region_targets.get(region, MAX_COUNTRY_PCT))
     effective_pct = min(tgt_pct + 10, 80)  # 10% tolerance for regions
-    max_in_region = max(2, round(MAX_HOLDINGS * effective_pct / 100))
+    max_in_region = max(2, round(max_holdings * effective_pct / 100))
     reg_exp = _region_exposure(holdings)
     return (reg_exp.get(region, 0) + 1) > max_in_region
 
@@ -231,11 +231,11 @@ def reconcile(decisions: dict, contexts: dict) -> dict:
                 trade_plan[ticker] = {'action': 'WATCH', 'shares_delta': 0, 'reasoning': 'Portfolio full', 'confidence': item['confidence']}
                 _update_watchlist_action(ticker, 'add', item['confidence'])
                 continue
-        if _would_breach_sector(ticker, [{'ticker': t} for t in holding_tickers]):
+        if _would_breach_sector(ticker, [{'ticker': t} for t in holding_tickers], MAX_HOLDINGS):
             trade_plan[ticker] = {'action': 'WATCH', 'shares_delta': 0, 'reasoning': 'Sector limit breach', 'confidence': item['confidence']}
             _update_watchlist_action(ticker, 'add', item['confidence'])
             continue
-        if _would_breach_country(ticker, [{'ticker': t} for t in holding_tickers]):
+        if _would_breach_country(ticker, [{'ticker': t} for t in holding_tickers], MAX_HOLDINGS):
             trade_plan[ticker] = {'action': 'WATCH', 'shares_delta': 0, 'reasoning': 'Country limit breach', 'confidence': item['confidence']}
             _update_watchlist_action(ticker, 'add', item['confidence'])
             continue
@@ -253,11 +253,11 @@ def reconcile(decisions: dict, contexts: dict) -> dict:
             trade_plan[ticker] = {'action': 'WATCH', 'shares_delta': 0, 'reasoning': 'Portfolio full', 'confidence': item['confidence']}
             _update_watchlist_action(ticker, 'add', item['confidence'])
             continue
-        if _would_breach_sector(ticker, [{'ticker': t} for t in holding_tickers]):
+        if _would_breach_sector(ticker, [{'ticker': t} for t in holding_tickers], MAX_HOLDINGS):
             trade_plan[ticker] = {'action': 'WATCH', 'shares_delta': 0, 'reasoning': 'Sector limit', 'confidence': item['confidence']}
             _update_watchlist_action(ticker, 'add', item['confidence'])
             continue
-        if _would_breach_country(ticker, [{'ticker': t} for t in holding_tickers]):
+        if _would_breach_country(ticker, [{'ticker': t} for t in holding_tickers], MAX_HOLDINGS):
             trade_plan[ticker] = {'action': 'WATCH', 'shares_delta': 0, 'reasoning': 'Region limit', 'confidence': item['confidence']}
             _update_watchlist_action(ticker, 'add', item['confidence'])
             continue

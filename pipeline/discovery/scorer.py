@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 sys.path.insert(0, '/home/ubuntu/advisor')
 from db.database import query, execute, log
+from pipeline.signal_engine import compute_drp
 
 
 def _score_gdelt_velocity(ticker):
@@ -190,10 +191,46 @@ def score_candidates():
         })
 
     scored.sort(key=lambda x: -x['total_score'])
-    top20 = scored[:20]
+
+    # Load sector targets for DRP (score scale 0-100, so alpha=10)
+    import json as _j
+    _st = query("SELECT value FROM user_settings WHERE key='sector_targets'")
+    _sector_targets_raw: dict = _j.loads(_st[0]['value']) if _st and _st[0]['value'] else {}
+    target_weights = {s: float(v) / 100 for s, v in _sector_targets_raw.items()}
+    N_disc = 50  # discovery pool size for DRP threshold
+
+    # Bulk-fetch sectors for all scored candidates in one query
+    all_tickers = [c['ticker'] for c in scored]
+    sector_map: dict = {}
+    if all_tickers:
+        urows = query("SELECT ticker, sector FROM universe WHERE ticker IN %s",
+                      (tuple(all_tickers),))
+        sector_map = {r['ticker']: (r['sector'] or 'Unknown').split('-')[0] for r in urows}
+
+    # Iterative greedy selection with DRP to avoid sector flooding in top-20
+    candidate_sector_counts: dict = {}
+    remaining = list(scored)
+    top20 = []
+
+    while len(top20) < 20 and remaining:
+        best = None
+        best_score = float('-inf')
+        for c in remaining:
+            sec = sector_map.get(c['ticker'], 'Unknown')
+            drp = compute_drp(sec, candidate_sector_counts, target_weights,
+                              N_disc, alpha=10.0)
+            final = c['total_score'] - drp
+            if final > best_score:
+                best, best_score = c, final
+        if best is None:
+            break
+        top20.append(best)
+        remaining.remove(best)
+        sec = sector_map.get(best['ticker'], 'Unknown')
+        candidate_sector_counts[sec] = candidate_sector_counts.get(sec, 0) + 1
 
     top_summary = ', '.join(f"{c['ticker']}({c['total_score']:.0f})" for c in top20[:5])
-    log('INFO', 'scorer', f'Scored {len(scored)} candidates, top: {top_summary}')
+    log('INFO', 'scorer', f'Scored {len(scored)} candidates, top (DRP-adjusted): {top_summary}')
     return top20
 
 
