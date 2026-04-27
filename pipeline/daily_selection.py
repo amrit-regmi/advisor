@@ -59,17 +59,25 @@ def _get_watchlist() -> list:
     return [r['ticker'] for r in rows]
 
 
-def _build_diversity_state(already_selected: list, max_holdings: int):
+def _build_diversity_state(already_selected: list, max_holdings: int, rotation_mode: bool = False):
     """
     Build portfolio-aware diversity caps and score adjustments from UI allocation settings.
 
     Returns (sector_counts, region_counts, sector_cap_fn, region_cap_fn, adjust_score_fn).
 
-    Cap formula:  holdings_in_category + max(1, headroom × 2)
-    headroom    = UI-configured max slots − current holding count
+    rotation_mode=True (used when portfolio is fully allocated):
+      - Overweight penalty disabled — we still need to surface replacement candidates
+        from at-cap sectors so reconciliation can evaluate intra-sector rotation.
+      - Rotation buffer doubled (held + max(2, headroom×2)) so every held sector gets
+        at least 2 candidates for reconciliation to compare against current holdings.
+      - Diversification/novelty bonuses kept — cross-sector rotation opportunities
+        should still be surfaced.
+
+    Normal mode cap formula:  holdings_in_category + max(1, headroom × 2)
+    Rotation mode cap formula: holdings_in_category + max(2, headroom × 2)
 
     Score adjustment (applied before ranking, preserves within-sector ordering):
-      overweight_penalty : up to -0.20 when sector utilisation ≥ 75%
+      overweight_penalty : up to -0.20 when sector utilisation ≥ 75% (disabled in rotation mode)
       diversification_bonus : up to +0.10 when sector utilisation ≤ 50%
       novelty_bonus : +0.05 when sector not in recommendations last 7 days
       region adjustments: ±0.10 / ±0.05 on same utilisation curves
@@ -117,30 +125,35 @@ def _build_diversity_state(already_selected: list, max_holdings: int):
     def _utilisation(held: int, target_slots: int) -> float:
         return held / max(1, target_slots)
 
+    _buf = 2 if rotation_mode else 1  # rotation mode gives each held sector more candidates
+
     def sector_cap(sector: str) -> int:
         tgt_pct  = float(sector_targets.get(sector, 25))
         port_max = max(1, round(max_holdings * tgt_pct / 100))
         h        = port_sector.get(sector, 0)
-        return h + max(1, (max(0, port_max - h)) * 2)
+        return h + max(_buf, (max(0, port_max - h)) * 2)
 
     def region_cap(region: str) -> int:
         tgt_pct  = float(region_targets.get(region, DEFAULT_REGION_TARGETS.get(region, 40)))
         port_max = max(2, round(max_holdings * tgt_pct / 100))
         h        = port_region.get(region, 0)
-        return h + max(1, (max(0, port_max - h)) * 2)
+        return h + max(_buf, (max(0, port_max - h)) * 2)
 
     def adjust_score(raw: float, sector: str, region: str) -> float:
         """
         Adjust conviction score for portfolio fit without distorting within-sector ranking.
         All candidates in the same sector+region get the same delta, so the best ticker
         in each category still surfaces first.
+
+        In rotation_mode the overweight penalty is suppressed — we need to see
+        replacement candidates from at-cap sectors, not just underweight ones.
         """
         # --- Sector adjustment ---
         s_tgt_pct  = float(sector_targets.get(sector, 25))
         s_slots    = max(1, round(max_holdings * s_tgt_pct / 100))
         s_util     = _utilisation(port_sector.get(sector, 0), s_slots)
-        # Penalty: linear 0→-0.20 as utilisation goes from 0.75→1.0
-        s_penalty  = max(0.0, (s_util - 0.75) / 0.25) * 0.20
+        # Penalty suppressed in rotation mode (at-cap sectors still need rotation candidates)
+        s_penalty  = 0.0 if rotation_mode else max(0.0, (s_util - 0.75) / 0.25) * 0.20
         # Bonus: linear 0→+0.10 as utilisation goes from 0.50→0.0
         s_bonus    = max(0.0, (0.50 - s_util) / 0.50) * 0.10
         # Novelty: sector not recently in recommendations
@@ -150,7 +163,7 @@ def _build_diversity_state(already_selected: list, max_holdings: int):
         r_tgt_pct  = float(region_targets.get(region, DEFAULT_REGION_TARGETS.get(region, 40)))
         r_slots    = max(2, round(max_holdings * r_tgt_pct / 100))
         r_util     = _utilisation(port_region.get(region, 0), r_slots)
-        r_penalty  = max(0.0, (r_util - 0.75) / 0.25) * 0.10
+        r_penalty  = 0.0 if rotation_mode else max(0.0, (r_util - 0.75) / 0.25) * 0.10
         r_bonus    = max(0.0, (0.50 - r_util) / 0.50) * 0.05
 
         return raw - s_penalty - r_penalty + s_bonus + r_bonus + s_novelty
@@ -214,18 +227,22 @@ def _get_discovery_candidates(exclude: set, already_selected: list = None, max_h
     return result
 
 
-def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = None, max_holdings: int = 10) -> list:
+def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = None,
+                                max_holdings: int = 10, rotation_mode: bool = False) -> list:
     """
     Fill remaining analysis slots from the universe with portfolio-adjusted ranking
     and diversity caps. Within each sector the best conviction ticker still surfaces
     first. Safety top-up fills any remaining gaps without constraints.
+
+    rotation_mode=True when portfolio is fully allocated: penalty suppressed and
+    rotation buffer doubled so every held sector gets replacement candidates.
     """
     if n <= 0:
         return []
 
     already_selected = already_selected or []
     sector_counts, region_counts, sector_cap, region_cap, adjust_score = \
-        _build_diversity_state(already_selected, max_holdings)
+        _build_diversity_state(already_selected, max_holdings, rotation_mode=rotation_mode)
 
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
     exc_fragment, exc_params = _EXCHANGE_FILTER
@@ -338,7 +355,8 @@ def build_daily_selection() -> list:
     # 5. Rotation fill to reach TARGET_COUNT — diversity-aware
     shortage = TARGET_COUNT - len(selected)
     if shortage > 0:
-        fill = _get_universe_rotation_fill(seen, shortage, already_selected=selected, max_holdings=MAX_HOLDINGS)
+        fill = _get_universe_rotation_fill(seen, shortage, already_selected=selected,
+                                           max_holdings=MAX_HOLDINGS, rotation_mode=portfolio_full)
         for t in fill:
             if t not in seen:
                 c = compute_conviction(t)
