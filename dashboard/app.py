@@ -4792,17 +4792,29 @@ def reload_universe():
     script = '/home/ubuntu/advisor/reload_universe.sh'
     log_path = '/home/ubuntu/advisor/logs/daily.log'
     try:
+        env = {**os.environ, 'TERM': 'dumb', 'XDG_RUNTIME_DIR': f'/run/user/{os.getuid()}'}
         subprocess.Popen(
-            ['bash', script],
+            ['systemd-run', '--scope', '--user', '-u', 'advisor-universe.scope',
+             'bash', script],
             stdout=open(log_path, 'a'),
             stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env={**os.environ, 'TERM': 'dumb'},
+            env=env,
         )
         log('INFO', 'dashboard', 'Universe reload started')
         flash('Universe reload started — this takes several minutes.')
     except Exception as e:
-        flash(f'Failed to start universe reload: {e}')
+        log('WARNING', 'dashboard', f'systemd-run failed, falling back: {e}')
+        try:
+            subprocess.Popen(
+                ['bash', script],
+                stdout=open(log_path, 'a'),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env={**os.environ, 'TERM': 'dumb'},
+            )
+            flash('Universe reload started — this takes several minutes.')
+        except Exception as e2:
+            flash(f'Failed to start universe reload: {e2}')
     return redirect(url_for('pipeline'))
 
 
@@ -4816,18 +4828,32 @@ def run_pipeline():
     script = '/home/ubuntu/advisor/run_daily.sh'
     log_path = '/home/ubuntu/advisor/logs/daily.log'
     try:
-        env = {**os.environ, 'TERM': 'dumb'}
+        env = {**os.environ, 'TERM': 'dumb', 'XDG_RUNTIME_DIR': f'/run/user/{os.getuid()}'}
+        # Launch in a separate user-scope so the pipeline's memory usage is
+        # accounted outside the dashboard's cgroup and cannot OOM-kill the dashboard.
         subprocess.Popen(
-            ['bash', script],
+            ['systemd-run', '--scope', '--user', '-u', 'advisor-pipeline.scope',
+             'bash', script],
             stdout=open(log_path, 'a'),
             stderr=subprocess.STDOUT,
-            start_new_session=True,
             env=env,
         )
         log('INFO', 'dashboard', 'Pipeline started')
         flash('Pipeline started.')
     except Exception as e:
-        flash(f'Failed to start pipeline: {e}')
+        log('WARNING', 'dashboard', f'systemd-run failed, falling back to direct launch: {e}')
+        try:
+            subprocess.Popen(
+                ['bash', script],
+                stdout=open(log_path, 'a'),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env={**os.environ, 'TERM': 'dumb'},
+            )
+            log('INFO', 'dashboard', 'Pipeline started (direct)')
+            flash('Pipeline started.')
+        except Exception as e2:
+            flash(f'Failed to start pipeline: {e2}')
     return redirect(url_for('pipeline'))
 
 
