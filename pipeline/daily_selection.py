@@ -61,20 +61,35 @@ def _get_watchlist() -> list:
 
 def _build_diversity_state(already_selected: list, max_holdings: int):
     """
-    Build portfolio-aware diversity caps from UI allocation settings.
+    Build portfolio-aware diversity caps and score adjustments from UI allocation settings.
 
-    Returns (sector_counts, region_counts, sector_cap_fn, region_cap_fn) where
-    the cap functions tell you the maximum number of analysis slots allowed for
-    a given sector/region given current portfolio headroom.
+    Returns (sector_counts, region_counts, sector_cap_fn, region_cap_fn, adjust_score_fn).
 
     Cap formula:  holdings_in_category + max(1, headroom × 2)
     headroom    = UI-configured max slots − current holding count
+
+    Score adjustment (applied before ranking, preserves within-sector ordering):
+      overweight_penalty : up to -0.20 when sector utilisation ≥ 75%
+      diversification_bonus : up to +0.10 when sector utilisation ≤ 50%
+      novelty_bonus : +0.05 when sector not in recommendations last 7 days
+      region adjustments: ±0.10 / ±0.05 on same utilisation curves
     """
     # Load UI targets (same DB keys reconciliation reads)
     _st = query("SELECT value FROM user_settings WHERE key='sector_targets'")
     sector_targets: dict = json.loads(_st[0]['value']) if _st and _st[0]['value'] else {}
     _rt = query("SELECT value FROM user_settings WHERE key='region_targets'")
     region_targets: dict = json.loads(_rt[0]['value']) if _rt and _rt[0]['value'] else DEFAULT_REGION_TARGETS
+
+    # Sectors seen in recommendations in the last 7 days (for novelty bonus)
+    recent_rows = query("""
+        SELECT DISTINCT u.sector
+        FROM recommendations r
+        JOIN universe u ON u.ticker = r.ticker
+        WHERE r.date >= %s AND u.sector IS NOT NULL
+    """, (date.today() - timedelta(days=7),))
+    recently_analyzed_sectors = {
+        (r['sector'] or '').split('-')[0] for r in recent_rows
+    }
 
     # Fetch sector/country for all already-selected tickers in one query
     all_tickers = [item['ticker'] for item in already_selected]
@@ -99,6 +114,9 @@ def _build_diversity_state(already_selected: list, max_holdings: int):
             port_sector[s] = port_sector.get(s, 0) + 1
             port_region[country_to_region(c)] = port_region.get(country_to_region(c), 0) + 1
 
+    def _utilisation(held: int, target_slots: int) -> float:
+        return held / max(1, target_slots)
+
     def sector_cap(sector: str) -> int:
         tgt_pct  = float(sector_targets.get(sector, 25))
         port_max = max(1, round(max_holdings * tgt_pct / 100))
@@ -111,6 +129,32 @@ def _build_diversity_state(already_selected: list, max_holdings: int):
         h        = port_region.get(region, 0)
         return h + max(1, (max(0, port_max - h)) * 2)
 
+    def adjust_score(raw: float, sector: str, region: str) -> float:
+        """
+        Adjust conviction score for portfolio fit without distorting within-sector ranking.
+        All candidates in the same sector+region get the same delta, so the best ticker
+        in each category still surfaces first.
+        """
+        # --- Sector adjustment ---
+        s_tgt_pct  = float(sector_targets.get(sector, 25))
+        s_slots    = max(1, round(max_holdings * s_tgt_pct / 100))
+        s_util     = _utilisation(port_sector.get(sector, 0), s_slots)
+        # Penalty: linear 0→-0.20 as utilisation goes from 0.75→1.0
+        s_penalty  = max(0.0, (s_util - 0.75) / 0.25) * 0.20
+        # Bonus: linear 0→+0.10 as utilisation goes from 0.50→0.0
+        s_bonus    = max(0.0, (0.50 - s_util) / 0.50) * 0.10
+        # Novelty: sector not recently in recommendations
+        s_novelty  = 0.05 if sector not in recently_analyzed_sectors else 0.0
+
+        # --- Region adjustment (half the magnitude of sector) ---
+        r_tgt_pct  = float(region_targets.get(region, DEFAULT_REGION_TARGETS.get(region, 40)))
+        r_slots    = max(2, round(max_holdings * r_tgt_pct / 100))
+        r_util     = _utilisation(port_region.get(region, 0), r_slots)
+        r_penalty  = max(0.0, (r_util - 0.75) / 0.25) * 0.10
+        r_bonus    = max(0.0, (0.50 - r_util) / 0.50) * 0.05
+
+        return raw - s_penalty - r_penalty + s_bonus + r_bonus + s_novelty
+
     # Seed running counts from ALL already-selected (holdings, watchlist, etc.)
     sector_counts: dict = {}
     region_counts: dict = {}
@@ -120,32 +164,45 @@ def _build_diversity_state(already_selected: list, max_holdings: int):
         r = country_to_region(c)
         region_counts[r] = region_counts.get(r, 0) + 1
 
-    return sector_counts, region_counts, sector_cap, region_cap
+    return sector_counts, region_counts, sector_cap, region_cap, adjust_score
 
 
 def _get_discovery_candidates(exclude: set, already_selected: list = None, max_holdings: int = 10) -> list:
     """
-    Return today's BUY discovery candidates filtered by portfolio-aware diversity caps.
-    Fetches top-scored candidates and skips any that would exceed sector/region headroom.
+    Return today's BUY discovery candidates ranked by portfolio-adjusted score.
+
+    Candidates are fetched, re-ranked with overweight/diversification/novelty
+    adjustments, then filtered by sector/region caps. Within each sector the
+    best raw-score candidate always surfaces first (same adjustment delta for
+    all members of a sector).
     """
     already_selected = already_selected or []
-    sector_counts, region_counts, sector_cap, region_cap = _build_diversity_state(already_selected, max_holdings)
+    sector_counts, region_counts, sector_cap, region_cap, adjust_score = \
+        _build_diversity_state(already_selected, max_holdings)
 
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
     rows = query("""
-        SELECT dc.ticker, u.sector, u.country
+        SELECT dc.ticker, dc.total_score, u.sector, u.country
         FROM discovery_candidates dc
         LEFT JOIN universe u ON u.ticker = dc.ticker AND u.active = true
         WHERE dc.created_at >= %s AND dc.direction = 'BUY'
         AND dc.ticker NOT IN %s
-        ORDER BY dc.total_score DESC LIMIT 20
+        ORDER BY dc.total_score DESC LIMIT 30
     """, (date.today() - timedelta(days=1), exc_tuple))
 
-    result = []
+    # Normalise total_score (0-100) to 0-1 range for the adjuster
+    candidates = []
     for r in rows:
-        t      = r['ticker']
         sector = (r['sector'] or 'Unknown').split('-')[0]
         region = country_to_region(r['country'] or 'Unknown')
+        raw    = (r['total_score'] or 0) / 100.0
+        adj    = adjust_score(raw, sector, region)
+        candidates.append((r['ticker'], adj, sector, region))
+
+    candidates.sort(key=lambda x: -x[1])
+
+    result = []
+    for t, _adj, sector, region in candidates:
         if sector_counts.get(sector, 0) >= sector_cap(sector):
             continue
         if region_counts.get(region, 0) >= region_cap(region):
@@ -159,15 +216,16 @@ def _get_discovery_candidates(exclude: set, already_selected: list = None, max_h
 
 def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = None, max_holdings: int = 10) -> list:
     """
-    Fill remaining analysis slots from the universe with portfolio-aware diversity caps.
-    Uses the same cap logic as discovery so the full pipeline is consistent.
-    Safety top-up fills any remaining gaps without constraints.
+    Fill remaining analysis slots from the universe with portfolio-adjusted ranking
+    and diversity caps. Within each sector the best conviction ticker still surfaces
+    first. Safety top-up fills any remaining gaps without constraints.
     """
     if n <= 0:
         return []
 
     already_selected = already_selected or []
-    sector_counts, region_counts, sector_cap, region_cap = _build_diversity_state(already_selected, max_holdings)
+    sector_counts, region_counts, sector_cap, region_cap, adjust_score = \
+        _build_diversity_state(already_selected, max_holdings)
 
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
     exc_fragment, exc_params = _EXCHANGE_FILTER
@@ -181,16 +239,20 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
 
     pool = [(r['ticker'], (r['sector'] or 'Unknown').split('-')[0], r['country'] or 'Unknown')
             for r in rows]
-    scored = sorted(
-        ((t, compute_conviction(t), s, c) for t, s, c in pool[:60]),
-        key=lambda x: -x[1],
-    )
+
+    # Score then re-rank with portfolio adjustments
+    scored = []
+    for t, s, c in pool[:60]:
+        raw = compute_conviction(t)
+        region = country_to_region(c)
+        adj = adjust_score(raw, s, region)
+        scored.append((t, adj, s, region))
+    scored.sort(key=lambda x: -x[1])
 
     result = []
-    for t, _conv, sector, country in scored:
+    for t, _adj, sector, region in scored:
         if len(result) >= n:
             break
-        region = country_to_region(country)
         if sector_counts.get(sector, 0) >= sector_cap(sector):
             continue
         if region_counts.get(region, 0) >= region_cap(region):
