@@ -43,6 +43,7 @@ OR_MODELS = [
 
 _DAILY_TICKER_LIMIT_DEFAULT = int(os.getenv('DAILY_ANALYSIS_COUNT', 20))
 _MAX_HOLDINGS_DEFAULT       = int(os.getenv('MAX_HOLDINGS', 10))
+MAX_HOLDINGS                = _MAX_HOLDINGS_DEFAULT  # module-level; refreshed by analyze_ticker
 
 
 def _discover_keys(env_prefix: str) -> list[str]:
@@ -867,6 +868,7 @@ def analyze_daily_set(daily_set: list, signals: dict) -> dict:
     signals:   {ticker: {conviction: float}}
     Returns:   {ticker: pm_final_decision}
     """
+    global MAX_HOLDINGS
     from db.database import get_setting
     DAILY_TICKER_LIMIT = get_setting('daily_analysis_count', _DAILY_TICKER_LIMIT_DEFAULT)
     MAX_HOLDINGS       = get_setting('max_holdings', _MAX_HOLDINGS_DEFAULT)
