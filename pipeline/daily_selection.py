@@ -10,6 +10,7 @@ Configurable via .env:
 """
 import os
 import sys
+import json
 from datetime import date, timedelta
 
 sys.path.insert(0, '/home/ubuntu/advisor')
@@ -17,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv('/home/ubuntu/advisor/.env')
 from db.database import query, log, get_setting
 from pipeline.signal_engine import compute_conviction
+from portfolio.sector_utils import country_to_region, DEFAULT_REGION_TARGETS
 
 STRONG_CONVICTION_THRESHOLD = 0.70
 WATCHLIST_CONVICTION_THRESHOLD = 0.55
@@ -72,23 +74,29 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
     """
     Fill remaining analysis slots from the universe with portfolio-aware diversity caps.
 
-    Caps are derived from actual portfolio headroom rather than a fixed % of analysis slots:
-      sector_analysis_cap  = holdings_in_sector + max(1, headroom * 2)
-      country_analysis_cap = holdings_in_country + max(1, headroom * 2)
+    Caps are driven by the UI-configured sector_targets / region_targets (same values
+    that reconciliation enforces), so selection and reconciliation are always aligned.
 
-    This means:
-    - Sectors with lots of portfolio room get more analysis candidates (high-signal sectors
-      like Tech naturally dominate when there is room).
-    - Sectors at portfolio cap still get 1 rotation buffer slot (potential replacement).
-    - Sectors already covered by holdings/watchlist count toward the cap automatically,
-      so we never double-analyze the same name.
+      sector_analysis_cap(s) = holdings_in_s + max(1, headroom_in_s × 2)
+      region_analysis_cap(r) = holdings_in_r + max(1, headroom_in_r × 2)
 
-    Portfolio limits mirror reconciliation: 25% weight per sector, 40% per country.
+    headroom = UI target slots - current holding count for that sector/region.
+
+    Effect:
+    - Sectors/regions with room get proportionally more analysis candidates.
+    - Sectors/regions at their UI-configured cap keep 1 rotation-buffer slot.
+    - Safety top-up fills any remaining gaps without constraints.
     """
     if n <= 0:
         return []
 
     already_selected = already_selected or []
+
+    # Load UI-configured targets (same source reconciliation uses)
+    _sector_tgt_row = query("SELECT value FROM user_settings WHERE key='sector_targets'")
+    sector_targets: dict = json.loads(_sector_tgt_row[0]['value']) if _sector_tgt_row and _sector_tgt_row[0]['value'] else {}
+    _region_tgt_row = query("SELECT value FROM user_settings WHERE key='region_targets'")
+    region_targets: dict = json.loads(_region_tgt_row[0]['value']) if _region_tgt_row and _region_tgt_row[0]['value'] else DEFAULT_REGION_TARGETS
 
     # Single meta query for all already-selected tickers
     all_tickers = [item['ticker'] for item in already_selected]
@@ -99,40 +107,42 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
 
     def _sc(ticker: str) -> tuple:
         r = meta_map.get(ticker, {})
-        return (
-            (r.get('sector') or 'Unknown').split('-')[0],  # normalise ETF-* → ETF
-            r.get('country') or 'Unknown',
-        )
+        s = (r.get('sector') or 'Unknown').split('-')[0]  # normalise ETF-* → ETF
+        c = r.get('country') or 'Unknown'
+        return s, c
 
     # Portfolio state: only current holdings → determines headroom
     port_sector_counts: dict = {}
-    port_country_counts: dict = {}
+    port_region_counts: dict = {}
     for item in already_selected:
         if item.get('state') == 'holding':
             s, c = _sc(item['ticker'])
             port_sector_counts[s]  = port_sector_counts.get(s, 0)  + 1
-            port_country_counts[c] = port_country_counts.get(c, 0) + 1
-
-    port_sector_cap  = max(1, int(max_holdings * 0.25))   # e.g. 2 for 10 holdings
-    port_country_cap = max(2, int(max_holdings * 0.40))   # e.g. 4 for 10 holdings
+            region = country_to_region(c)
+            port_region_counts[region] = port_region_counts.get(region, 0) + 1
 
     def sector_analysis_cap(sector: str) -> int:
-        h_count  = port_sector_counts.get(sector, 0)
-        headroom = max(0, port_sector_cap - h_count)
+        tgt_pct   = float(sector_targets.get(sector, 25))   # default 25% if not configured
+        port_cap  = max(1, round(max_holdings * tgt_pct / 100))
+        h_count   = port_sector_counts.get(sector, 0)
+        headroom  = max(0, port_cap - h_count)
         return h_count + max(1, headroom * 2)
 
-    def country_analysis_cap(country: str) -> int:
-        h_count  = port_country_counts.get(country, 0)
-        headroom = max(0, port_country_cap - h_count)
+    def region_analysis_cap(region: str) -> int:
+        tgt_pct   = float(region_targets.get(region, DEFAULT_REGION_TARGETS.get(region, 40)))
+        port_cap  = max(2, round(max_holdings * tgt_pct / 100))
+        h_count   = port_region_counts.get(region, 0)
+        headroom  = max(0, port_cap - h_count)
         return h_count + max(1, headroom * 2)
 
     # Seed counts from ALL already-selected (holdings, watchlist, strong_override, discovery)
     sector_counts: dict = {}
-    country_counts: dict = {}
+    region_counts: dict = {}
     for item in already_selected:
         s, c = _sc(item['ticker'])
-        sector_counts[s]  = sector_counts.get(s, 0)  + 1
-        country_counts[c] = country_counts.get(c, 0) + 1
+        sector_counts[s] = sector_counts.get(s, 0) + 1
+        region = country_to_region(c)
+        region_counts[region] = region_counts.get(region, 0) + 1
 
     # Fetch a large diverse pool to score from
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
@@ -152,18 +162,19 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
         key=lambda x: -x[1],
     )
 
-    # Pick greedily by conviction while respecting portfolio-aware caps
+    # Pick greedily by conviction with UI-configured portfolio-aware caps
     result = []
     for t, _conv, sector, country in scored:
         if len(result) >= n:
             break
+        region = country_to_region(country)
         if sector_counts.get(sector, 0) >= sector_analysis_cap(sector):
             continue
-        if country_counts.get(country, 0) >= country_analysis_cap(country):
+        if region_counts.get(region, 0) >= region_analysis_cap(region):
             continue
         result.append(t)
-        sector_counts[sector]  = sector_counts.get(sector, 0)  + 1
-        country_counts[country] = country_counts.get(country, 0) + 1
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        region_counts[region] = region_counts.get(region, 0) + 1
 
     # Safety: if caps left unfilled slots, top-up without constraints
     if len(result) < n:
