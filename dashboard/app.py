@@ -2316,18 +2316,28 @@ def pipeline():
         WHERE r.date = %s AND r.action != 'HOLD'
         ORDER BY r.ticker, r.confidence DESC
     """, (date.today(),))
-    candidates = query("""
-        SELECT * FROM (
-            SELECT DISTINCT ON (dc.ticker)
-                   dc.ticker, dc.direction, dc.event_type, dc.total_score, dc.reason,
-                   COALESCE(u.company_name, dc.ticker) AS company_name
-            FROM discovery_candidates dc
-            LEFT JOIN universe u ON dc.ticker = u.ticker
-            WHERE dc.date = %s AND dc.eligible = TRUE
-            ORDER BY dc.ticker, dc.total_score DESC
-        ) sub
-        ORDER BY total_score DESC LIMIT 10
-    """, (date.today(),))
+    # Load the actual set sent to trading agents (written by daily_selection.py)
+    _sel_row = query("SELECT value FROM user_settings WHERE key='last_daily_selection'")
+    candidates = []
+    if _sel_row and _sel_row[0]['value']:
+        import json as _json
+        _sel = _json.loads(_sel_row[0]['value'])
+        if _sel.get('date') == str(date.today()):
+            # Enrich with company_name from universe
+            tickers = [i['ticker'] for i in _sel.get('tickers', [])]
+            if tickers:
+                _meta = query("SELECT ticker, company_name FROM universe WHERE ticker IN %s", (tuple(tickers),))
+                _meta_map = {r['ticker']: r['company_name'] for r in _meta}
+            else:
+                _meta_map = {}
+            for item in _sel.get('tickers', []):
+                candidates.append({
+                    'ticker':       item['ticker'],
+                    'direction':    'BUY',
+                    'event_type':   item['state'],
+                    'total_score':  item['conviction'] * 100,
+                    'company_name': _meta_map.get(item['ticker'], item['ticker']),
+                })
     pipeline_running = _pipeline_is_running()
     return render_template_string(
         make_page(_PIPELINE, 'Pipeline'),

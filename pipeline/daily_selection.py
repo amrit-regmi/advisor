@@ -16,7 +16,7 @@ from datetime import date, timedelta
 sys.path.insert(0, '/home/ubuntu/advisor')
 from dotenv import load_dotenv
 load_dotenv('/home/ubuntu/advisor/.env')
-from db.database import query, log, get_setting
+from db.database import query, execute, log, get_setting
 from pipeline.signal_engine import compute_conviction
 from portfolio.sector_utils import country_to_region, DEFAULT_REGION_TARGETS
 
@@ -373,11 +373,29 @@ def build_daily_selection() -> list:
                 seen.add(t)
         log('daily_selection', 'info', f'Rotation fill: {len(fill)} added')
 
-    log('daily_selection', 'info', f'Selection built: {len(selected)} tickers (target={TARGET_COUNT}, max_holdings={MAX_HOLDINGS})')
-    for item in selected:
+    final = selected[:TARGET_COUNT]
+
+    log('daily_selection', 'info', f'Selection built: {len(final)} tickers (target={TARGET_COUNT}, max_holdings={MAX_HOLDINGS})')
+    for item in final:
         log('daily_selection', 'info', f"  {item['ticker']} ({item['state']}) conviction={item['conviction']:.3f}")
 
-    return selected[:TARGET_COUNT]
+    # Persist full selection so dashboard can show exactly what went to agents
+    execute("""
+        INSERT INTO user_settings (key, value, updated_at)
+        VALUES ('last_daily_selection', %s, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    """, (json.dumps({'date': str(date.today()), 'tickers': final}),))
+
+    # Mark discovery-sourced picks in discovery_candidates
+    discovery_tickers = [i['ticker'] for i in final if i.get('state') == 'discovery']
+    if discovery_tickers:
+        execute("""
+            UPDATE discovery_candidates
+            SET selected_for_analysis = TRUE
+            WHERE ticker IN %s AND date = %s
+        """, (tuple(discovery_tickers), date.today()))
+
+    return final
 
 
 # Backward-compat alias used by trading_agents_wrapper
