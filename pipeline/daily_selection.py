@@ -213,7 +213,7 @@ def _get_discovery_candidates(exclude: set, already_selected: list = None, max_h
     for r in rows:
         sector = (r['sector'] or 'Unknown').split('-')[0]
         region = country_to_region(r['country'] or 'Unknown')
-        raw    = (r['total_score'] or 0) / 100.0
+        raw    = float(r['total_score'] or 0) / 100.0
         adj    = adjust_score(raw, sector, region)
         candidates.append((r['ticker'], adj, sector, region))
 
