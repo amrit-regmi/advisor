@@ -59,92 +59,116 @@ def _get_watchlist() -> list:
     return [r['ticker'] for r in rows]
 
 
-def _get_discovery_candidates(exclude: set) -> list:
-    exc_tuple = tuple(exclude) if exclude else ('__none__',)
-    rows = query("""
-        SELECT ticker FROM discovery_candidates
-        WHERE created_at >= %s AND direction = 'BUY'
-        AND ticker NOT IN %s
-        ORDER BY total_score DESC LIMIT 10
-    """, (date.today() - timedelta(days=1), exc_tuple))
-    return [r['ticker'] for r in rows]
-
-
-def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = None, max_holdings: int = 10) -> list:
+def _build_diversity_state(already_selected: list, max_holdings: int):
     """
-    Fill remaining analysis slots from the universe with portfolio-aware diversity caps.
+    Build portfolio-aware diversity caps from UI allocation settings.
 
-    Caps are driven by the UI-configured sector_targets / region_targets (same values
-    that reconciliation enforces), so selection and reconciliation are always aligned.
+    Returns (sector_counts, region_counts, sector_cap_fn, region_cap_fn) where
+    the cap functions tell you the maximum number of analysis slots allowed for
+    a given sector/region given current portfolio headroom.
 
-      sector_analysis_cap(s) = holdings_in_s + max(1, headroom_in_s × 2)
-      region_analysis_cap(r) = holdings_in_r + max(1, headroom_in_r × 2)
-
-    headroom = UI target slots - current holding count for that sector/region.
-
-    Effect:
-    - Sectors/regions with room get proportionally more analysis candidates.
-    - Sectors/regions at their UI-configured cap keep 1 rotation-buffer slot.
-    - Safety top-up fills any remaining gaps without constraints.
+    Cap formula:  holdings_in_category + max(1, headroom × 2)
+    headroom    = UI-configured max slots − current holding count
     """
-    if n <= 0:
-        return []
+    # Load UI targets (same DB keys reconciliation reads)
+    _st = query("SELECT value FROM user_settings WHERE key='sector_targets'")
+    sector_targets: dict = json.loads(_st[0]['value']) if _st and _st[0]['value'] else {}
+    _rt = query("SELECT value FROM user_settings WHERE key='region_targets'")
+    region_targets: dict = json.loads(_rt[0]['value']) if _rt and _rt[0]['value'] else DEFAULT_REGION_TARGETS
 
-    already_selected = already_selected or []
-
-    # Load UI-configured targets (same source reconciliation uses)
-    _sector_tgt_row = query("SELECT value FROM user_settings WHERE key='sector_targets'")
-    sector_targets: dict = json.loads(_sector_tgt_row[0]['value']) if _sector_tgt_row and _sector_tgt_row[0]['value'] else {}
-    _region_tgt_row = query("SELECT value FROM user_settings WHERE key='region_targets'")
-    region_targets: dict = json.loads(_region_tgt_row[0]['value']) if _region_tgt_row and _region_tgt_row[0]['value'] else DEFAULT_REGION_TARGETS
-
-    # Single meta query for all already-selected tickers
+    # Fetch sector/country for all already-selected tickers in one query
     all_tickers = [item['ticker'] for item in already_selected]
     meta_map: dict = {}
     if all_tickers:
-        meta = query("SELECT ticker, sector, country FROM universe WHERE ticker IN %s", (tuple(all_tickers),))
-        meta_map = {r['ticker']: r for r in meta}
+        rows = query("SELECT ticker, sector, country FROM universe WHERE ticker IN %s", (tuple(all_tickers),))
+        meta_map = {r['ticker']: r for r in rows}
 
     def _sc(ticker: str) -> tuple:
         r = meta_map.get(ticker, {})
-        s = (r.get('sector') or 'Unknown').split('-')[0]  # normalise ETF-* → ETF
-        c = r.get('country') or 'Unknown'
-        return s, c
+        return (
+            (r.get('sector') or 'Unknown').split('-')[0],  # normalise ETF-* → ETF
+            r.get('country') or 'Unknown',
+        )
 
-    # Portfolio state: only current holdings → determines headroom
-    port_sector_counts: dict = {}
-    port_region_counts: dict = {}
+    # Portfolio headroom: driven by holdings only
+    port_sector: dict = {}
+    port_region: dict = {}
     for item in already_selected:
         if item.get('state') == 'holding':
             s, c = _sc(item['ticker'])
-            port_sector_counts[s]  = port_sector_counts.get(s, 0)  + 1
-            region = country_to_region(c)
-            port_region_counts[region] = port_region_counts.get(region, 0) + 1
+            port_sector[s] = port_sector.get(s, 0) + 1
+            port_region[country_to_region(c)] = port_region.get(country_to_region(c), 0) + 1
 
-    def sector_analysis_cap(sector: str) -> int:
-        tgt_pct   = float(sector_targets.get(sector, 25))   # default 25% if not configured
-        port_cap  = max(1, round(max_holdings * tgt_pct / 100))
-        h_count   = port_sector_counts.get(sector, 0)
-        headroom  = max(0, port_cap - h_count)
-        return h_count + max(1, headroom * 2)
+    def sector_cap(sector: str) -> int:
+        tgt_pct  = float(sector_targets.get(sector, 25))
+        port_max = max(1, round(max_holdings * tgt_pct / 100))
+        h        = port_sector.get(sector, 0)
+        return h + max(1, (max(0, port_max - h)) * 2)
 
-    def region_analysis_cap(region: str) -> int:
-        tgt_pct   = float(region_targets.get(region, DEFAULT_REGION_TARGETS.get(region, 40)))
-        port_cap  = max(2, round(max_holdings * tgt_pct / 100))
-        h_count   = port_region_counts.get(region, 0)
-        headroom  = max(0, port_cap - h_count)
-        return h_count + max(1, headroom * 2)
+    def region_cap(region: str) -> int:
+        tgt_pct  = float(region_targets.get(region, DEFAULT_REGION_TARGETS.get(region, 40)))
+        port_max = max(2, round(max_holdings * tgt_pct / 100))
+        h        = port_region.get(region, 0)
+        return h + max(1, (max(0, port_max - h)) * 2)
 
-    # Seed counts from ALL already-selected (holdings, watchlist, strong_override, discovery)
+    # Seed running counts from ALL already-selected (holdings, watchlist, etc.)
     sector_counts: dict = {}
     region_counts: dict = {}
     for item in already_selected:
         s, c = _sc(item['ticker'])
         sector_counts[s] = sector_counts.get(s, 0) + 1
-        region = country_to_region(c)
+        r = country_to_region(c)
+        region_counts[r] = region_counts.get(r, 0) + 1
+
+    return sector_counts, region_counts, sector_cap, region_cap
+
+
+def _get_discovery_candidates(exclude: set, already_selected: list = None, max_holdings: int = 10) -> list:
+    """
+    Return today's BUY discovery candidates filtered by portfolio-aware diversity caps.
+    Fetches top-scored candidates and skips any that would exceed sector/region headroom.
+    """
+    already_selected = already_selected or []
+    sector_counts, region_counts, sector_cap, region_cap = _build_diversity_state(already_selected, max_holdings)
+
+    exc_tuple = tuple(exclude) if exclude else ('__none__',)
+    rows = query("""
+        SELECT dc.ticker, u.sector, u.country
+        FROM discovery_candidates dc
+        LEFT JOIN universe u ON u.ticker = dc.ticker AND u.active = true
+        WHERE dc.created_at >= %s AND dc.direction = 'BUY'
+        AND dc.ticker NOT IN %s
+        ORDER BY dc.total_score DESC LIMIT 20
+    """, (date.today() - timedelta(days=1), exc_tuple))
+
+    result = []
+    for r in rows:
+        t      = r['ticker']
+        sector = (r['sector'] or 'Unknown').split('-')[0]
+        region = country_to_region(r['country'] or 'Unknown')
+        if sector_counts.get(sector, 0) >= sector_cap(sector):
+            continue
+        if region_counts.get(region, 0) >= region_cap(region):
+            continue
+        result.append(t)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
         region_counts[region] = region_counts.get(region, 0) + 1
 
-    # Fetch a large diverse pool to score from
+    return result
+
+
+def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = None, max_holdings: int = 10) -> list:
+    """
+    Fill remaining analysis slots from the universe with portfolio-aware diversity caps.
+    Uses the same cap logic as discovery so the full pipeline is consistent.
+    Safety top-up fills any remaining gaps without constraints.
+    """
+    if n <= 0:
+        return []
+
+    already_selected = already_selected or []
+    sector_counts, region_counts, sector_cap, region_cap = _build_diversity_state(already_selected, max_holdings)
+
     exc_tuple = tuple(exclude) if exclude else ('__none__',)
     exc_fragment, exc_params = _EXCHANGE_FILTER
     rows = query(
@@ -162,15 +186,14 @@ def _get_universe_rotation_fill(exclude: set, n: int, already_selected: list = N
         key=lambda x: -x[1],
     )
 
-    # Pick greedily by conviction with UI-configured portfolio-aware caps
     result = []
     for t, _conv, sector, country in scored:
         if len(result) >= n:
             break
         region = country_to_region(country)
-        if sector_counts.get(sector, 0) >= sector_analysis_cap(sector):
+        if sector_counts.get(sector, 0) >= sector_cap(sector):
             continue
-        if region_counts.get(region, 0) >= region_analysis_cap(region):
+        if region_counts.get(region, 0) >= region_cap(region):
             continue
         result.append(t)
         sector_counts[sector] = sector_counts.get(sector, 0) + 1
@@ -242,7 +265,7 @@ def build_daily_selection() -> list:
 
     # 4. Discovery candidates (only when portfolio has room)
     if not portfolio_full:
-        discovery = _get_discovery_candidates(seen)
+        discovery = _get_discovery_candidates(seen, already_selected=selected, max_holdings=MAX_HOLDINGS)
         for t in discovery[:SLOTS['discovery']]:
             if t not in seen:
                 c = compute_conviction(t)
